@@ -407,6 +407,22 @@ export function PencilIcon(props: IconProps) {
     );
 }
 
+export function SpeechIcon(props: IconProps) {
+    return (
+        <Icon
+            {...props}
+            className={classes(props.className, "vc-speech-icon")}
+            viewBox="0 0 24 24"
+        >
+            <path
+                fill="currentColor"
+                d="M12 22a10 10 0 1 0-8.45-4.64c.13.19.11.44-.04.61l-2.06 2.37A1 1 0 0 0 2.2 22H12Z"
+            ></path>
+        </Icon>
+    );
+}
+
+
 const WebsiteIconDark = "/assets/e1e96d89e192de1997f73730db26e94f.svg";
 const WebsiteIconLight = "/assets/730f58bcfd5a57a5e22460c445a0c6cf.svg";
 const GithubIconLight = "/assets/3ff98ad75ac94fa883af5ed62d17c459.svg";

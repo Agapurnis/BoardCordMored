@@ -335,5 +335,7 @@ export const commonRendererPlugins = [
     banImportPlugin(/^react$/, "Cannot import from react. React and hooks should be imported from @webpack/common"),
     banImportPlugin(/^electron(\/.*)?$/, "Cannot import electron in browser code. You need to use a native.ts file"),
     banImportPlugin(/^ts-pattern$/, "Cannot import from ts-pattern. match and P should be imported from @webpack/common"),
+    banImportPlugin(/^zustand$/, "Cannot import from zustand. zustandCreate and zustandPersist should be imported from @webpack/common"),
+    banImportPlugin(/^exit-hook$/, "Cannot import from exit-hook. You need to use getExitHook from @utils/dependencies in a native.ts file"),
     ...commonOpts.plugins
 ];

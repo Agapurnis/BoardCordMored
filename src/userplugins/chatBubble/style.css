@@ -1,0 +1,55 @@
+.vc-cb-editor-modal > :first-child {
+    justify-content: space-between
+}
+
+.vc-cb-editor-modal > :not(:first-child, :last-child) {
+    border-radius: 0;
+}
+
+
+.vc-cb-editor-modal {
+    resize: auto;
+    overflow: auto;
+    max-width: calc(100vw - 1em);
+    max-height: calc(100vh - 1em);
+}
+
+.vc-cb-editor-modal-content {
+    padding: 0;
+    overflow: auto !important;
+    height: 300px;
+    display: flex;
+}
+
+.vc-cb-editor-modal-content .vc-cb-crop-dimmed {
+    filter: brightness(0.7);
+}
+
+.vc-cb-contain {
+    max-width: 100%;
+    max-height: 100%;
+    position: absolute;
+    margin: auto;
+    inset: 0;
+}
+
+.vc-cb-editor-points {
+    pointer-events: none;
+}
+
+.vc-cb-editor-points > * {
+    width: var(--vc-cb-editor-point-size);
+    height: var(--vc-cb-editor-point-size);
+    background: var(--vc-cb-editor-point-color);
+    position: absolute;
+    pointer-events: all;
+}
+
+.vc-cb-editor-modal input[type="color"] {
+    position: absolute;
+    height: 100%;
+    width: 100%;
+    top: 0;
+    left: 0;
+    opacity: 0;
+}

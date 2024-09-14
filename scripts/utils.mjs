@@ -25,6 +25,6 @@ export function getPluginTarget(filePath) {
     if (/^index\.tsx?$/.test(pathParts.at(-1))) pathParts.pop();
 
     const identifier = pathParts.at(-1).replace(/\.tsx?$/, "");
-    const identiferBits = identifier.split(".");
-    return identiferBits.length === 1 ? null : identiferBits.at(-1);
+    const identifierBits = identifier.split(".");
+    return identifierBits.length === 1 ? null : identifierBits.at(-1);
 }
