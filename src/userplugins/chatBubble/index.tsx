@@ -188,10 +188,10 @@ interface MessageContextMenuProperties {
 }
 
 const messageAttachmentContextMenu: NavContextMenuPatchCallback = (children: Array<React.ReactElement | null>, props: MessageContextMenuProperties) => {
-    const src = props.itemSafeSrc?.replace(/^https:\/\/media\./, "https://cdn."); if (!src) return; // FIXME don't need to do this (edit the uhh http request header interceptor thing)
+    const url = props.itemSafeSrc; if (!url) return;
     const mime = props.mediaItem?.contentType;
     const group = findGroupChildrenByChildId("copy-link", children);
-    group?.push(ChatBubbleContextMenuItem({ url: src, mime: mime, channel: props.channel }));
+    group?.push(ChatBubbleContextMenuItem({ url, mime, channel: props.channel }));
 };
 
 export default definePlugin({
@@ -233,10 +233,6 @@ export default definePlugin({
             }
         }
     ],
-
-    start() {
-        window.nativeEval = Native.evaluate;
-    },
 
     deregisterUpload({ item: { file } }: Upload | { item: { file: File; }; }) {
         const chatbubble = Chatbubble.fileMapped.get(file);
@@ -521,6 +517,7 @@ class ChatbubbleConfiguration {
                 height: source.naturalHeight
             });
         } else {
+            // not really but uh
             this.uncroppedResolution = Object.seal({
                 width: source.videoWidth,
                 height: source.videoHeight
@@ -599,8 +596,10 @@ class Chatbubble {
     }
 
     public async export(filename: string, format: ChatbubbleExportFormat = this.configuration.format, quality?: number): Promise<File> {
+        const hasFFmpeg = await Native.isFFmpegSupported();
         const needsFFmpeg = !isChatbubbleExportFormatSupportedWithoutFFmpeg(format) || this.configuration.file.type.startsWith("video");
-        if (!needsFFmpeg) {
+
+        if (!needsFFmpeg && !(hasFFmpeg && format === ChatbubbleExportFormat.GIF)) {
             const offscreen = makeCanvas(this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution), OffscreenCanvas);
             const renderer = new ChatbubbleCanvasRenderer(this.configuration, DrawingMode.Final, offscreen.canvas, offscreen.context);
             renderer.drawImage();
@@ -608,9 +607,8 @@ class Chatbubble {
             return renderer.export(filename, format, quality);
         }
 
-
         // TODO: the path thing doesnt work if i dont launch it from terminal
-        if (!(await Native.isFFmpegSupported())) {
+        if (!hasFFmpeg) {
             // TODO: UI for errors
             alert("ermmm,,,, ffmpeg pls");
             throw new Error("ff-mpreg!!!!");
@@ -622,7 +620,7 @@ class Chatbubble {
             const bounds = roundSpacial(this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution), Math.trunc);
             const offscreen = makeCanvas(bounds, OffscreenCanvas);
             const renderer = new ChatbubbleCanvasRenderer(this.configuration, DrawingMode.Final, offscreen.canvas, offscreen.context);
-            if (transparent && format.toString().startsWith("video")) {
+            if (transparent && (format.toString().startsWith("video") || format === ChatbubbleExportFormat.GIF)) {
                 renderer.context.globalCompositeOperation = "source-over";
                 renderer.context.fillStyle = "black";
                 renderer.context.fillRect(0, 0, renderer.canvas.width, renderer.canvas.height);
@@ -702,18 +700,18 @@ function useOnSizeChange(element: HTMLElement, callback: () => void) {
     useEffect(() => () => observer.disconnect());
 }
 
-function getContainFitVideo(video: HTMLVideoElement) {
-    const canonical = video.videoWidth / video.videoHeight;
-    const stretched = video.clientWidth / video.clientHeight;
+function getContainFit(element: HTMLElement, resolution: Dimensions) {
+    const canonical = resolution.width / resolution.height;
+    const stretched = element.clientWidth / element.clientHeight;
 
     let width: number;
     let height: number;
     if (canonical > stretched) {
-        width = video.clientWidth;
-        height = video.clientWidth / stretched;
+        width = element.clientWidth;
+        height = element.clientWidth / canonical;
     } else {
-        width = video.clientHeight * canonical;
-        height = video.clientHeight;
+        width = element.clientHeight * canonical;
+        height = element.clientHeight;
     }
 
     return { width, height };
@@ -722,8 +720,6 @@ function getContainFitVideo(video: HTMLVideoElement) {
 
 function ChatbubbleEditor({ chatbubble }: { chatbubble: Chatbubble; }) {
     const { configuration: { source, uncroppedResolution: resolution }, preview } = chatbubble;
-    const square = resolution.width / resolution.height === 1;
-    if (square) source.style.width = "100%"; // hack
 
     const dimmed = useMemo(() => {
         const dimmed = source.cloneNode() as HTMLImageElement;
@@ -731,19 +727,8 @@ function ChatbubbleEditor({ chatbubble }: { chatbubble: Chatbubble; }) {
         return dimmed;
     }, [source]);
 
-
     useOnSizeChange(source, () => {
-        if (square) {
-            // hack
-            if (source.clientWidth > source.clientHeight) {
-                source.style.height = "100%";
-                source.style.width = String();
-            } else {
-                source.style.height = String();
-                source.style.width = "100%";
-            }
-        }
-        preview.resize((source instanceof HTMLImageElement) ? source : getContainFitVideo(source));
+        preview.resize(getContainFit(source, resolution));
         draw();
     });
 
@@ -755,9 +740,9 @@ function ChatbubbleEditor({ chatbubble }: { chatbubble: Chatbubble; }) {
     draw();
     return <>
         {ReactWrapHTML("div", {}, [dimmed, source, preview.canvas as HTMLCanvasElement])}
-        <Points chatbubble={chatbubble} onChange={() => chatbubble.updateCropClip()} dimensions={resolution} list={ChatbubblePoints.List.Identifier.Crop} />
-        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} list={ChatbubblePoints.List.Identifier.Bezier} />
-        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} list={ChatbubblePoints.List.Identifier.Spike} />
+        <Points chatbubble={chatbubble} onChange={() => chatbubble.updateCropClip()} dimensions={resolution} clamp={true} list={ChatbubblePoints.List.Identifier.Crop} />
+        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} clamp={false} list={ChatbubblePoints.List.Identifier.Bezier} />
+        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} clamp={false} list={ChatbubblePoints.List.Identifier.Spike} />
     </>;
 }
 
@@ -819,18 +804,19 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
 }
 
 
-function Points({ chatbubble, dimensions, list, onChange: notifyChange }: {
+function Points({ chatbubble, dimensions, list, onChange: notifyChange, clamp }: {
     chatbubble: Chatbubble,
     dimensions: Dimensions;
     list: ChatbubblePoints.List.Identifier;
     onChange: () => void;
+    clamp: boolean;
 }) {
     const points = chatbubble.configuration.points(state => state[list]).normalized;
     const color = ChatbubblePoints.List.VisualizationColors[list];
 
     return <div
         data-list-type={list}
-        className={cl("editor-points", "contain")}
+        className={cl("editor-points", "contain-like")}
         style={{
             ["--vc-cb-editor-point-size" as never]: "10px",
             ["--vc-cb-editor-point-color" as never]: color,
@@ -842,6 +828,7 @@ function Points({ chatbubble, dimensions, list, onChange: notifyChange }: {
                 color={color}
                 position={position}
                 onMove={position => { points[index] = position; notifyChange(); }}
+                clamp={clamp}
             />
         )}
     </div>;
@@ -851,13 +838,17 @@ function clamp(value: number, lo: number, hi: number) {
     return Math.max(lo, Math.min(hi, value));
 }
 
+function first<T>(v: T, ...args: unknown[]): T { return v; }
+
 function DraggableNormalizedPointVisualization({
     position,
     onMove: escalatePositionInfo,
+    clamp: doClamp,
 }: {
     color: string;
     position: CoordinateTuple;
     onMove: (position: CoordinateTuple) => void;
+    clamp: boolean;
 }) {
     const ref = useRef<HTMLDivElement | null>(null);
     let click: MouseEvent | null = null;
@@ -874,10 +865,8 @@ function DraggableNormalizedPointVisualization({
         const container = ref.current.parentElement!;
         const origin = container.getBoundingClientRect();
         const size = Number(window.getComputedStyle(container).getPropertyValue("--vc-cb-editor-point-size").slice(0, -"px".length));
-        // const x = clamp((event.pageX - origin.x - click!.offsetX) / (origin.width - size), 0, 1);
-        // const y = clamp((event.pageY - origin.y - click!.offsetY) / (origin.height - size), 0, 1);
-        const x = (event.pageX - origin.x - click!.offsetX) / (origin.width - size);
-        const y = (event.pageY - origin.y - click!.offsetY) / (origin.height - size);
+        const x = (doClamp ? clamp : first)((event.pageX - origin.x - click!.offsetX) / (origin.width - size), 0, 1) as number;
+        const y = (doClamp ? clamp : first)((event.pageY - origin.y - click!.offsetY) / (origin.height - size), 0, 1) as number;
         const position = [x, y] as const;
         updateStyledPosition(position);
         escalatePositionInfo(position);

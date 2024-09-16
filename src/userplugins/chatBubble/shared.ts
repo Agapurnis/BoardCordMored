@@ -116,7 +116,6 @@ export function isChatbubbleExportFormatSupportedWithoutFFmpeg<T extends Chatbub
     return SUPPORTED_CANVAS_EXPORT_FORMATS.has(format as ChatbubbleCanvasExportFormat);
 }
 
-
 export namespace ChatbubblePoints {
     type Tuple<T, N extends number, A extends T[] = []> = A["length"] extends N ? A : Tuple<T, N, [...A, T]>;
     export type CoordinateTuple = readonly [x: number, y: number];

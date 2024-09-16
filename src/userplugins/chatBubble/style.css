@@ -9,7 +9,7 @@
 
 .vc-cb-editor-modal {
     resize: auto;
-    overflow: visible;
+    overflow: overlay;
     max-width: calc(100vw - 1em);
     max-height: calc(100vh - 1em);
 }
@@ -27,6 +27,13 @@
 }
 
 .vc-cb-contain {
+    height: 100%;
+    width: 100%;
+    object-fit: contain;
+    position: absolute;
+}
+
+.vc-cb-contain-like {
     max-width: 100%;
     max-height: 100%;
     position: absolute;

@@ -106,14 +106,19 @@ if (IS_VESKTOP || !IS_VANILLA) {
             }
         };
 
+        const isDiscordHostname = (hostname: string) => /^(?:.*\.)?discord(?:app(?=\.com))?\.(?:gg|com|media)$/.test(hostname);
+
         session.defaultSession.webRequest.onHeadersReceived(({ url, responseHeaders, resourceType, referrer }, cb) => {
             if (responseHeaders) {
 
                 if (resourceType === "mainFrame")
                     patchCsp(responseHeaders);
 
-                if (resourceType === "xhr" && new URL(url).hostname === "cdn.discordapp.com" && /^(?:.*\.)?discord(?:app(?=\.com))?\.(?:gg|com|media)$/.test(new URL(referrer).hostname))
-                    responseHeaders["access-control-allow-origin"] = [new URL(referrer).origin];
+                try {
+                    const parsedReferrer = URL.parse(referrer);
+                    if (parsedReferrer && resourceType === "xhr" && new URL(url).hostname.match(/^(?:media|cdn)\.discordapp\.(?:net|com)$/) && isDiscordHostname(parsedReferrer.hostname))
+                        responseHeaders["access-control-allow-origin"] = [parsedReferrer.origin];
+                } catch (_) { }
 
                 // Fix hosts that don't properly set the css content type, such as
                 // raw.githubusercontent.com

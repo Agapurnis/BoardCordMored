@@ -4,9 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// import { getFluentFfmpeg } from "@utils/dependencies";
-// import { IpcMainInvokeEvent } from "electron";
-
+// TODO: cleanup doesnt actually wokr
 
 import * as child_process from "child_process";
 import type { IpcMainInvokeEvent } from "electron";
@@ -658,6 +656,7 @@ namespace FFmpegJob {
             exportType: ChatbubbleExportFormat;
         }): FFmpegJob.IO.Method {
             if (
+                (inputMime === ChatbubbleExportFormat.GIF) ||
                 (inputMime.startsWith("video") && exportType === ChatbubbleExportFormat.GIF) || // need entire for palette gen across video ?? idk actually i need more reseach
                 (exportType === ChatbubbleExportFormat.MP4) || // fragment are stinky
                 (exportType === ChatbubbleExportFormat.WEBM)
@@ -774,14 +773,14 @@ namespace FFmpegJob {
         args.push("-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${overlay.bounds.width}x${overlay.bounds.height}`, "-i", io.paths.bubble);
         let filter = String(); let last = "0"; const last_bubble = "1";
         filter += `[${last}]crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}:exact=1[cropped];`; last = "cropped";
-        if (overlay.transparent && type !== ChatbubbleExportFormat.GIF) {
+        if (overlay.transparent) {
             filter += `[${last_bubble}]alphaextract[trans];[${last}][trans]alphamerge[overlaid];`; last = "overlaid";
         } else {
             filter += `[${last}][${last_bubble}]overlay=${overlay.bounds.x}:${overlay.bounds.y}[overlaid];`; last = "overlaid";
         }
         if (type === ChatbubbleExportFormat.GIF) {
             // https://superuser.com/a/1323430
-            filter += `[${last}]split=[a][b];[a]palettegen[pal];[b][pal]paletteuse[paletted];`; last = "paletted";
+            filter += `[${last}]split=[a][b];[a]palettegen[pal];[b][pal]paletteuse=dither=sierra2_4a[paletted];`; last = "paletted";
         }
         args.push("-filter_complex", filter);
         args.push("-map", `[${last}]`);
@@ -802,6 +801,7 @@ export async function ffmpeg(_: IpcMainInvokeEvent, options: ChatbubbleFFmpegOpt
     | { failure?: never, output: Uint8Array; }
     | { failure: ChatbubbleFFmpegDelegationFailure; output?: never; }
 > {
+    job?.life.abort();
     // TODO: Dispatch current progress to the client.
     [job, err] = await FFmpegJob.for(options);
     if (err) return { failure: err };
@@ -811,35 +811,12 @@ export async function ffmpeg(_: IpcMainInvokeEvent, options: ChatbubbleFFmpegOpt
     });
 }
 
+export async function cancelJob(_: IpcMainInvokeEvent): Promise<void> {
+    job?.life.abort();
+}
+
 export async function isFFmpegSupported(_: IpcMainInvokeEvent): Promise<boolean> {
     const [binary] = await tryGetFfmpegPath();
     return binary !== null;
 }
 
-// const main = await fsp.readFile("/Users/katini/Downloads/sky_dicking.gif");
-// const bubble = await fsp.readFile("/Users/katini/Downloads/bubble.rgba");
-
-// const { output, failure } = await ffmpeg({
-//     overlay: {
-//         transparent: true,
-//         bounds: { x: 0, y: 0, width: 800, height: 341 },
-//         pixels: new Uint8Array(bubble.buffer),
-//     },
-//     file: {
-//         mime: "video/webm",
-//         data: main,
-//         name: "jor",
-//     },
-//     target: {
-//         trim: [null, null], // TODO
-//         type: ChatbubbleExportFormat.GIF,
-//     }
-// });
-// if (failure) console.log(failure);
-// fs.writeFileSync("/Users/katini/Downloads/aaa.gif", output!);
-// console.log("Done!");
-
-
-export async function evaluate(event: IpcMainInvokeEvent, string: string) {
-    console.log(eval(string));
-}
