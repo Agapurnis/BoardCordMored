@@ -126,7 +126,6 @@ function makeCanvas({ width, height }: Dimensions, type: typeof OffscreenCanvas 
     return { canvas, context };
 }
 
-
 function ChatBubbleContextMenuItem({ url, mime, channel }: { url: string, mime?: string, channel: Channel; }) {
     return (
         <Menu.MenuItem
@@ -138,14 +137,12 @@ function ChatBubbleContextMenuItem({ url, mime, channel }: { url: string, mime?:
                 const fetched = await fetch(url, {
                     headers: mime?.startsWith("video") ? { "range": "bytes=0-" } : undefined,
                 });
-                console.log("wowaka");
 
-                const modified = fetched.headers.get("last-modified");
+                const modified = fetched.headers.get("last-modified"); // todo: get name
                 const file = new File([await fetched.blob()], "media", {
                     lastModified: modified ? Number(new Date(modified)) : Date.now(),
                     type: fetched.headers.get("content-type") ?? mime
                 });
-                console.log("kino");
 
                 const chatbubble = await Chatbubble.forFile(file);
                 openModal(props => <EditorModal
@@ -155,6 +152,7 @@ function ChatBubbleContextMenuItem({ url, mime, channel }: { url: string, mime?:
                         props.onClose();
                         if (save) {
                             const file = await chatbubble.export("bubble");
+                            chatbubble.persistUnderAssociatedFile(file);
                             UploadManager.addFile({
                                 channelId: channel.id,
                                 draftType: 0,
@@ -165,6 +163,8 @@ function ChatBubbleContextMenuItem({ url, mime, channel }: { url: string, mime?:
                                     platform: 1
                                 }
                             });
+                        } else {
+                            chatbubble.release();
                         }
                     }}
                 />);
@@ -183,19 +183,16 @@ interface MessageContextMenuMediaItem {
 interface MessageContextMenuProperties {
     message: Message,
     channel: Channel,
-    itemSafeSrc: string,
-    itemHref: string,
-    itemSrc: string,
+    itemSafeSrc?: string,
     mediaItem: MessageContextMenuMediaItem | undefined;
 }
 
 const messageAttachmentContextMenu: NavContextMenuPatchCallback = (children: Array<React.ReactElement | null>, props: MessageContextMenuProperties) => {
-    const src = props.itemSafeSrc.replace(/^https:\/\/media\./, "https://cdn."); if (!src) return;
+    const src = props.itemSafeSrc?.replace(/^https:\/\/media\./, "https://cdn."); if (!src) return; // FIXME don't need to do this (edit the uhh http request header interceptor thing)
     const mime = props.mediaItem?.contentType;
     const group = findGroupChildrenByChildId("copy-link", children);
     group?.push(ChatBubbleContextMenuItem({ url: src, mime: mime, channel: props.channel }));
 };
-
 
 export default definePlugin({
     name: "ChatBubblification",
@@ -241,9 +238,13 @@ export default definePlugin({
         window.nativeEval = Native.evaluate;
     },
 
-    deregisterUpload(upload: Upload) {
-        // TODO
-        console.log(upload);
+    deregisterUpload({ item: { file } }: Upload | { item: { file: File; }; }) {
+        const chatbubble = Chatbubble.fileMapped.get(file);
+        if (chatbubble) {
+            chatbubble.release();
+            Chatbubble.fileMapped.delete(file);
+        }
+        // -patch -GatewaySocket -cookie -find -mapMangled -start -registering -subscribing -RPCServer -preload -violation -content-security-policy
     },
 
     renderIcon(wrapped: { upload: Upload; }) {
@@ -259,7 +260,7 @@ export default definePlugin({
                             props.onClose();
                             if (save) {
                                 const file = await chatbubble.export(wrapped.upload.item.file.name);
-                                chatbubble.configuration.persistUnderAssociatedFile(file);
+                                chatbubble.persistUnderAssociatedFile(file);
                                 UploadManager.setFile({
                                     file: {
                                         file,
@@ -498,26 +499,21 @@ class ChatbubbleCanvasRenderer {
 }
 
 class ChatbubbleConfiguration {
-    private static readonly fileMapped = new Map<File, ChatbubbleConfiguration>();
     public static readonly TRANSPARENT = "#000000FF" as Color.Hex;
     public static async forFile(file: File) {
-        const existing = this.fileMapped.get(file);
-        if (existing) return existing;
-        // TODO: Figure out revoking better >:)
         type MediaConstructor = new () => ConstructorParameters<typeof ChatbubbleConfiguration>[1];
         const media = await load((file.type.startsWith("image")
             ? HTMLImageElement
             : HTMLVideoElement
         ) as MediaConstructor, file, { autoRevoke: false });
         media.classList.add(cl("contain"));
-        return new ChatbubbleConfiguration(file, media, true);
+        return new ChatbubbleConfiguration(file, media);
     }
 
     public readonly uncroppedResolution: Readonly<Dimensions>;
     constructor(
         public readonly file: File,
         public readonly source: HTMLImageElement | HTMLVideoElement,
-        protected readonly doRevoke = false
     ) {
         if (source instanceof HTMLImageElement) {
             this.uncroppedResolution = Object.seal({
@@ -530,10 +526,6 @@ class ChatbubbleConfiguration {
                 height: source.videoHeight
             });
         }
-    }
-
-    public release() {
-        if (this.doRevoke) URL.revokeObjectURL(this.source.src);
     }
 
     public removeCropClip() {
@@ -557,16 +549,6 @@ class ChatbubbleConfiguration {
         };
     }
 
-    private readonly associatedFile?: File;
-    public persistUnderAssociatedFile(newAssociatedFile?: File) {
-        if (newAssociatedFile) {
-            ChatbubbleConfiguration.fileMapped.delete(this.associatedFile!);
-            ChatbubbleConfiguration.fileMapped.set(newAssociatedFile, this);
-        } else if (this.associatedFile) {
-            ChatbubbleConfiguration.fileMapped.set(this.associatedFile, this);
-        }
-    }
-
     public fill = ChatbubbleConfiguration.TRANSPARENT;
     public format = ChatbubbleExportFormat.GIF;
     public readonly points = makePointStore({
@@ -577,8 +559,20 @@ class ChatbubbleConfiguration {
 }
 
 class Chatbubble {
+    public static readonly fileMapped = new Map<File, Chatbubble>();
     public static async forFile(file: File) {
-        return new Chatbubble(await ChatbubbleConfiguration.forFile(file));
+        const existing = Chatbubble.fileMapped.get(file);
+        if (existing) return existing;
+        const chatbubble = new Chatbubble(await ChatbubbleConfiguration.forFile(file));
+        Chatbubble.fileMapped.set(file, chatbubble);
+        return chatbubble;
+    }
+
+    private associatedFile: File;
+    public persistUnderAssociatedFile(file: File) {
+        Chatbubble.fileMapped.delete(this.associatedFile);
+        Chatbubble.fileMapped.set(file, this);
+        this.associatedFile = file;
     }
 
     public readonly preview: ChatbubbleCanvasRenderer;
@@ -586,6 +580,7 @@ class Chatbubble {
     constructor(
         public readonly configuration: ChatbubbleConfiguration
     ) {
+        this.associatedFile = configuration.file;
         const dimensions = configuration.source instanceof HTMLImageElement
             ? configuration.source
             : { width: 10, height: 10 }; // It'll figure itself out...
@@ -598,11 +593,10 @@ class Chatbubble {
         this.configuration.updateCropClip();
     }
 
-    public readonly [Symbol.dispose] = this.release;
     public release() {
-        this.configuration.release();
+        URL.revokeObjectURL(this.configuration.source.src);
+        Chatbubble.fileMapped.delete(this.associatedFile);
     }
-
 
     public async export(filename: string, format: ChatbubbleExportFormat = this.configuration.format, quality?: number): Promise<File> {
         const needsFFmpeg = !isChatbubbleExportFormatSupportedWithoutFFmpeg(format) || this.configuration.file.type.startsWith("video");
@@ -614,6 +608,8 @@ class Chatbubble {
             return renderer.export(filename, format, quality);
         }
 
+
+        // TODO: the path thing doesnt work if i dont launch it from terminal
         if (!(await Native.isFFmpegSupported())) {
             // TODO: UI for errors
             alert("ermmm,,,, ffmpeg pls");
@@ -676,10 +672,10 @@ function EditorModal({ modal, close, chatbubble }: {
                 <ModalCloseButton onClick={() => {
                     Alerts.show({
                         title: "Are you sure?",
-                        body: "Exiting without saving will disgard all changes.",
+                        body: "Exiting without saving will discard all changes.",
                         onConfirm: () => close(false),
                         confirmText: "Confirm",
-                        cancelText: "Nevermind"
+                        cancelText: "Cancel"
                     });
                 }} />
             </ModalHeader>
@@ -878,8 +874,10 @@ function DraggableNormalizedPointVisualization({
         const container = ref.current.parentElement!;
         const origin = container.getBoundingClientRect();
         const size = Number(window.getComputedStyle(container).getPropertyValue("--vc-cb-editor-point-size").slice(0, -"px".length));
-        const x = clamp((event.pageX - origin.x - click!.offsetX) / (origin.width - size), 0, 1);
-        const y = clamp((event.pageY - origin.y - click!.offsetY) / (origin.height - size), 0, 1);
+        // const x = clamp((event.pageX - origin.x - click!.offsetX) / (origin.width - size), 0, 1);
+        // const y = clamp((event.pageY - origin.y - click!.offsetY) / (origin.height - size), 0, 1);
+        const x = (event.pageX - origin.x - click!.offsetX) / (origin.width - size);
+        const y = (event.pageY - origin.y - click!.offsetY) / (origin.height - size);
         const position = [x, y] as const;
         updateStyledPosition(position);
         escalatePositionInfo(position);
@@ -889,16 +887,13 @@ function DraggableNormalizedPointVisualization({
         updateStyledPosition(position);
     }, [position]);
 
-    return <div
-        ref={ref}
-        onMouseDown={event => {
-            if (event.button !== 0) return; // TODO: mobile?
-            document.addEventListener("mouseup", () => {
-                document.removeEventListener("mousemove", updatePosition);
-            }, { once: true });
-            document.addEventListener("mousemove", updatePosition);
-            click = event.nativeEvent;
-        }}
-    />;
+    return <div ref={ref} onMouseDown={event => {
+        if (event.button !== 0) return; // TODO: mobile?
+        document.addEventListener("mouseup", () => {
+            document.removeEventListener("mousemove", updatePosition);
+        }, { once: true });
+        document.addEventListener("mousemove", updatePosition);
+        click = event.nativeEvent;
+    }} />;
 }
 

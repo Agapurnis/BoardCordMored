@@ -9,16 +9,17 @@
 
 .vc-cb-editor-modal {
     resize: auto;
-    overflow: auto;
+    overflow: visible;
     max-width: calc(100vw - 1em);
     max-height: calc(100vh - 1em);
 }
 
 .vc-cb-editor-modal-content {
     padding: 0;
-    overflow: auto !important;
+    overflow: visible !important;
     height: 300px;
     display: flex;
+    z-index: 1010;
 }
 
 .vc-cb-editor-modal-content .vc-cb-crop-dimmed {
@@ -43,7 +44,15 @@
     background: var(--vc-cb-editor-point-color);
     position: absolute;
     pointer-events: all;
+    z-index: 1020;
 }
+
+/* .vc-cb-editor-points > * > * {
+    width: var(--vc-cb-editor-point-size);
+    height: var(--vc-cb-editor-point-size);
+    position: relative;
+} */
+
 
 .vc-cb-editor-modal input[type="color"] {
     position: absolute;
