@@ -24,7 +24,7 @@ import { makeLazy } from "./lazy";
 
 // needed to parse APNGs in the nitroBypass plugin
 export const importApngJs = makeLazy(() => {
-    return require("./vendored/apng-canvas").APNG as { parseURL(url: string): Promise<ApngFrameData>; };
+    return require("./apng-canvas").APNG as { parseURL(url: string): Promise<ApngFrameData>; };
 });
 
 // https://wiki.mozilla.org/APNG_Specification#.60fcTL.60:_The_Frame_Control_Chunk
@@ -69,7 +69,7 @@ export interface ApngFrameData {
 // The below code is only used on the Desktop (electron) build of Vencord.
 // Browser (extension) builds do not contain these remote imports.
 
-// export const shikiWorkerSrc = `https://unpkg.com/@vap/shiki-worker@0.0.8/dist/${IS_DEV ? "index.js" : "index.min.js"}`;
+export const shikiWorkerSrc = `https://unpkg.com/@vap/shiki-worker@0.0.8/dist/${IS_DEV ? "index.js" : "index.min.js"}`;
 export const shikiOnigasmSrc = "https://unpkg.com/@vap/shiki@0.10.3/dist/onig.wasm";
 
 // @ts-expect-error
@@ -77,30 +77,3 @@ export const getStegCloak = /* #__PURE__*/ makeLazy(() => import("https://unpkg.
 
 // @ts-expect-error
 export const getExitHook = /* #__PURE__*/ makeLazy(() => import("https://unpkg.com/exit-hook@4.0.0/index.js") as Promise<typeof import("exit-hook")>);
-
-// export const getFluentFfmpeg = /* #__PURE__*/ makeLazy(async () => {
-//     const PACKAGE = "fluent-ffmpeg";
-//     const VERSION = "2.3.1";
-
-//     let url = "https://edge.bundlejs.com/";
-//     url += "?q=" + PACKAGE + "@" + VERSION;
-//     url += "&file&minify=false&config=" + encodeURIComponent(JSON.stringify({
-//         platform: "node",
-//         format: "esm",
-//     }));
-
-//     let bundled = await (await fetch(url)).text();
-
-//     const modules = new Set();
-//     bundled = "const __dirname = import.meta.dirname;\n" + bundled;
-//     bundled = bundled.replaceAll(/__require\("(?:node:)?(.*)"\)/g, (_, match) => {
-//         modules.add(match);
-//         return "$$required_" + match + "$$";
-//     });
-//     for (const module of modules) {
-//         if (!(await import("node:" + module))) throw new Error("Non-node import!");
-//         bundled = `import * as $$required_${module}$$ from "${module}";\n` + bundled;
-//     }
-
-//     return import("data:text/javascript;base64," + btoa(bundled)) as Promise<typeof import("fluent-ffmpeg")>;
-// });

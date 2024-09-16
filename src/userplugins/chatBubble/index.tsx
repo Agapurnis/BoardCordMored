@@ -17,8 +17,8 @@ import { Logger } from "@utils/Logger";
 import { ModalCloseButton, ModalContent, ModalFooter, ModalHeader, ModalProps, ModalRoot, openModal, openModalLazy } from "@utils/modal";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import { findByCodeLazy } from "@webpack";
-import { Alerts, Button, Menu, React, Select, Text, UploadManager, useEffect, useMemo, useRef, useState, zustandCreate } from "@webpack/common";
-import { Channel } from "discord-types/general";
+import { Alerts, Button, lodash, Menu, React, Select, Text, UploadManager, useEffect, useMemo, useRef, useState, zustandCreate } from "@webpack/common";
+import { Channel, Message } from "discord-types/general";
 import { applyPalette, Encoder, GIFEncoder, quantize } from "gifenc";
 import { Flatten } from "ts-pattern/dist/types/helpers";
 
@@ -75,19 +75,37 @@ function ReactWrapHTML(type: string, props: Record<string, unknown>, children: H
     });
 }
 
-function loadImage(from: Blob | MediaSource, { autoRevoke = true } = {}) {
-    return new Promise<HTMLImageElement>((resolve, reject) => {
+function roundSpacial<T extends Dimensions | Rectangle>(spacial: T, round: (n: number) => number = Math.round, clone = [Object, null].includes(Reflect.getPrototypeOf(spacial) as any)): T {
+    if (clone) spacial = lodash.pick(spacial, "x", "y", "width", "height") as T;
+    if ("x" in spacial) {
+        spacial.x = round(spacial.x);
+        spacial.y = round(spacial.y);
+    }
+    spacial.width = round(spacial.width);
+    spacial.height = round(spacial.height);
+    return spacial;
+}
+
+function load<T extends
+    | HTMLImageElement
+    | HTMLVideoElement
+>(type: new () => T, from: Blob | MediaSource, { autoRevoke = true } = {}): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
         const url = URL.createObjectURL(from);
-        const image = new Image();
-        image.onerror = event => {
+        const media = document.createElement((type === HTMLImageElement) ? "img" : "video") as T;
+        media.onerror = event => {
             URL.revokeObjectURL(url);
-            reject(new Error("Could not load image", { cause: event }));
+            reject(new Error("Could not load", { cause: event }));
         };
-        image.onload = () => {
+        media.onload = () => {
             if (autoRevoke) URL.revokeObjectURL(url);
-            resolve(image);
+            resolve(media);
         };
-        image.src = url;
+        media.onloadeddata = () => {
+            if (autoRevoke) URL.revokeObjectURL(url);
+            resolve(media);
+        };
+        media.src = url;
     });
 }
 
@@ -109,7 +127,7 @@ function makeCanvas({ width, height }: Dimensions, type: typeof OffscreenCanvas 
 }
 
 
-function ChatBubbleContextMenuItem({ url, channel }: { url: string, channel: Channel; }) {
+function ChatBubbleContextMenuItem({ url, mime, channel }: { url: string, mime?: string, channel: Channel; }) {
     return (
         <Menu.MenuItem
             icon={SpeechIcon}
@@ -117,13 +135,19 @@ function ChatBubbleContextMenuItem({ url, channel }: { url: string, channel: Cha
             key="chatbubble-prompt"
             id="chatbubble-prompt"
             action={async () => {
-                const contents = [await (await fetch(url)).blob()];
-                const file = new File(contents, "bubble.gif", {
-                    lastModified: Date.now(),
-                    type: "image/gif",
+                const fetched = await fetch(url, {
+                    headers: mime?.startsWith("video") ? { "range": "bytes=0-" } : undefined,
                 });
-                const chatbubble = await Chatbubble.forFile(file);
+                console.log("wowaka");
 
+                const modified = fetched.headers.get("last-modified");
+                const file = new File([await fetched.blob()], "media", {
+                    lastModified: modified ? Number(new Date(modified)) : Date.now(),
+                    type: fetched.headers.get("content-type") ?? mime
+                });
+                console.log("kino");
+
+                const chatbubble = await Chatbubble.forFile(file);
                 openModal(props => <EditorModal
                     modal={props}
                     chatbubble={chatbubble}
@@ -149,13 +173,27 @@ function ChatBubbleContextMenuItem({ url, channel }: { url: string, channel: Cha
     );
 }
 
-// yoinked from translate plugin
-const messageContextMenuPatch: NavContextMenuPatchCallback = (children, props) => {
-    console.log(children, props);
-    if (props?.reverseImageSearchType !== "img") return; // im just gonna use this in lieu of my own thing for now FIXME
-    const src = props.itemHref ?? props.itemSrc;
+
+interface MessageContextMenuMediaItem {
+    contentType: string,
+    proxyUrl: string,
+    url: string;
+}
+
+interface MessageContextMenuProperties {
+    message: Message,
+    channel: Channel,
+    itemSafeSrc: string,
+    itemHref: string,
+    itemSrc: string,
+    mediaItem: MessageContextMenuMediaItem | undefined;
+}
+
+const messageAttachmentContextMenu: NavContextMenuPatchCallback = (children: Array<React.ReactElement | null>, props: MessageContextMenuProperties) => {
+    const src = props.itemSafeSrc.replace(/^https:\/\/media\./, "https://cdn."); if (!src) return;
+    const mime = props.mediaItem?.contentType;
     const group = findGroupChildrenByChildId("copy-link", children);
-    group?.push(ChatBubbleContextMenuItem({ url: src, channel: props.channel }));
+    group?.push(ChatBubbleContextMenuItem({ url: src, mime: mime, channel: props.channel }));
 };
 
 
@@ -180,6 +218,14 @@ export default definePlugin({
                 match: /(?<=children:\[)(?=.{10,80}tooltip:.{0,100}\i\.\i\.Messages\.ATTACHMENT_UTILITIES_SPOILER)/,
                 replace: "arguments[0].canEdit!==false?$self.renderIcon(arguments[0]):null,"
             },
+        },
+        {
+            // Adapted from from the reverseImageSearch plugin :)
+            find: ".Messages.MESSAGE_ACTIONS_MENU_LABEL,shouldHideMediaOptions",
+            replacement: {
+                match: /favoriteableType:\i,(?<=(\i)\.getAttribute\("data-type"\).+?)/,
+                replace: (m, target) => `${m}actionsTarget:${target},`
+            }
         },
         {
             find: "Messages.ATTACHMENT_UTILITIES_REMOVE",
@@ -235,7 +281,7 @@ export default definePlugin({
     },
 
     contextMenus: {
-        "message": messageContextMenuPatch,
+        "message": messageAttachmentContextMenu,
     }
 });
 
@@ -322,11 +368,13 @@ class ChatbubbleCanvasRenderer {
     }
 
     protected drawBubbleLines() {
-        this.drawOutline(ChatbubblePoints.List.Identifier.Spike, "red");
-        this.drawOutline(ChatbubblePoints.List.Identifier.Bezier, "blue");
+        for (const list of [
+            ChatbubblePoints.List.Identifier.Spike,
+            ChatbubblePoints.List.Identifier.Bezier,
+        ]) this.drawOutline(list, ChatbubblePoints.List.VisualizationColors[list]);
     }
 
-    public draw() {
+    public drawBubble() {
         this.drawSpike();
         this.drawBezier();
         if (this.mode === DrawingMode.Preview) {
@@ -338,32 +386,22 @@ class ChatbubbleCanvasRenderer {
         this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
     }
 
-    protected drawOverlaid() {
+    public drawImage() {
+        if (!(this.configuration.source instanceof HTMLImageElement)) throw new Error("Can only use `drawImage` with image sources!");
         this.context.globalCompositeOperation = "source-over";
         const { x, y } = this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution);
-        this.context.drawImage(this.configuration.image,
+        this.context.drawImage(this.configuration.source,
             x, y, this.canvas.width, this.canvas.height,
             0, 0, this.canvas.width, this.canvas.height
         );
         this.updateDrawStyle();
     }
 
-    protected getOverlaidOnImage(clear: boolean): ImageData {
-        this.configuration.removeCropClip();
-        this.drawOverlaid();
-        this.draw();
-        const imageData = this.context.getImageData(0, 0, this.canvas.width, this.canvas.height);
-        if (clear) {
-            this.clear();
-            this.draw();
-        }
-        this.configuration.updateCropClip();
-        return imageData;
-    }
-
     protected exportGIF(): Encoder {
         const gif = GIFEncoder();
-        const { data, width, height } = this.getOverlaidOnImage(true);
+        this.configuration.removeCropClip();
+        const { data, width, height } = this.context.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        this.configuration.updateCropClip();
         const palette = quantize(data, 256, { format: "rgba4444", });
         const index = applyPalette(data, palette, "rgba4444");
         gif.writeFrame(index, width, height, { transparent: true, palette, });
@@ -372,8 +410,6 @@ class ChatbubbleCanvasRenderer {
     }
 
     protected async exportPNG(quality?: number): Promise<Blob> {
-        this.drawOverlaid();
-        this.draw();
         const { canvas } = this;
         if (canvas instanceof OffscreenCanvas) {
             return canvas.convertToBlob({
@@ -389,7 +425,7 @@ class ChatbubbleCanvasRenderer {
     }
 
     public async export(filename: string, format: ChatbubbleCanvasExportFormat, quality?: number): Promise<File> {
-        let contents: BlobPart[] = [];
+        let contents: BlobPart[];
         let extension: string;
         switch (format) {
             case ChatbubbleExportFormat.GIF: {
@@ -411,34 +447,33 @@ class ChatbubbleCanvasRenderer {
     }
 
     public resize(dimensions: Dimensions) {
+        if (
+            dimensions.width === 0 ||
+            dimensions.height === 0
+        ) return;
         this.canvas.width = dimensions.width;
         this.canvas.height = dimensions.height;
         this.updateDrawStyle();
     }
 
     public getOffsetCanvasSpace(): Rectangle {
-        if (this.mode === DrawingMode.Preview) {
-            const { width, height } = this.canvas;
-            return { width, height, x: 0, y: 0 };
+        switch (this.mode) {
+            case DrawingMode.Preview: {
+                const { width, height } = this.canvas;
+                return { width, height, x: 0, y: 0 };
+            }
+            case DrawingMode.Final: {
+                const { width, height } = this.configuration.uncroppedResolution;
+                const { x, y } = this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution);
+                return { width, height, x: -x, y: -y };
+            }
+            default: assertUnreachable(this.mode);
         }
-        if (this.mode === DrawingMode.Final) {
-            // const { width, height } = this.configuration.uncroppedResolution;
-            const { width, height } = this.configuration.uncroppedResolution;
-            const { x, y } = this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution);
-            console.log({
-                canvas: this.canvas,
-                full: this.configuration.uncroppedResolution,
-                cropped: this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution),
-                metacrop: this.configuration.getCroppedRectangle(this.canvas)
-            });
-            return { width, height, x: -x, y: -y };
-        }
-        throw new Error("unhandled"); // FIXME use exhaustive
     }
 
     protected readonly transparencyPattern = new LazyDirtyable(() => {
-        const checkboard = makeCheckerboardTransparencyPattern(20);
-        return this.context.createPattern(checkboard, "repeat")!;
+        const checkerboard = makeCheckerboardTransparencyPattern(20);
+        return this.context.createPattern(checkerboard, "repeat")!;
     });
 
     public updateDrawStyle() {
@@ -464,36 +499,50 @@ class ChatbubbleCanvasRenderer {
 
 class ChatbubbleConfiguration {
     private static readonly fileMapped = new Map<File, ChatbubbleConfiguration>();
+    public static readonly TRANSPARENT = "#000000FF" as Color.Hex;
     public static async forFile(file: File) {
         const existing = this.fileMapped.get(file);
         if (existing) return existing;
-        const image = await loadImage(file, { autoRevoke: false });
-        image.classList.add(cl("contain"));
-        return new ChatbubbleConfiguration(image, true);
+        // TODO: Figure out revoking better >:)
+        type MediaConstructor = new () => ConstructorParameters<typeof ChatbubbleConfiguration>[1];
+        const media = await load((file.type.startsWith("image")
+            ? HTMLImageElement
+            : HTMLVideoElement
+        ) as MediaConstructor, file, { autoRevoke: false });
+        media.classList.add(cl("contain"));
+        return new ChatbubbleConfiguration(file, media, true);
     }
 
     public readonly uncroppedResolution: Readonly<Dimensions>;
     constructor(
-        public readonly image: HTMLImageElement,
+        public readonly file: File,
+        public readonly source: HTMLImageElement | HTMLVideoElement,
         protected readonly doRevoke = false
     ) {
-        this.uncroppedResolution = Object.seal({
-            width: this.image.naturalWidth,
-            height: this.image.naturalHeight
-        });
+        if (source instanceof HTMLImageElement) {
+            this.uncroppedResolution = Object.seal({
+                width: source.naturalWidth,
+                height: source.naturalHeight
+            });
+        } else {
+            this.uncroppedResolution = Object.seal({
+                width: source.videoWidth,
+                height: source.videoHeight
+            });
+        }
     }
 
     public release() {
-        if (this.doRevoke) URL.revokeObjectURL(this.image.src);
+        if (this.doRevoke) URL.revokeObjectURL(this.source.src);
     }
 
     public removeCropClip() {
-        this.image.style.clipPath = String();
+        this.source.style.clipPath = String();
     }
 
     public updateCropClip() {
         const { x, y, width, height } = this.getCroppedRectangle({ width: 1, height: 1 });
-        this.image.style.clipPath = "xywh(" + [x, y, width, height].map(n => (n * 100) + "%").join(" ") + ")";
+        this.source.style.clipPath = "xywh(" + [x, y, width, height].map(n => (n * 100) + "%").join(" ") + ")";
     }
 
     public getCroppedRectangle(scale: Dimensions) {
@@ -518,7 +567,7 @@ class ChatbubbleConfiguration {
         }
     }
 
-    public fill = "#000000FF" as Color.Hex;
+    public fill = ChatbubbleConfiguration.TRANSPARENT;
     public format = ChatbubbleExportFormat.GIF;
     public readonly points = makePointStore({
         [ChatbubblePoints.List.Identifier.Crop]: new NormalizedPointList([[0, 0], [1, 1]]),
@@ -537,7 +586,10 @@ class Chatbubble {
     constructor(
         public readonly configuration: ChatbubbleConfiguration
     ) {
-        const preview = makeCanvas(configuration.image, HTMLCanvasElement);
+        const dimensions = configuration.source instanceof HTMLImageElement
+            ? configuration.source
+            : { width: 10, height: 10 }; // It'll figure itself out...
+        const preview = makeCanvas(dimensions, HTMLCanvasElement);
         this.preview = new ChatbubbleCanvasRenderer(configuration, DrawingMode.Preview, preview.canvas, preview.context);
         this.updateCropClip();
     }
@@ -551,11 +603,62 @@ class Chatbubble {
         this.configuration.release();
     }
 
-    public async export(filename: string, format: ChatbubbleExportFormat = this.configuration.format, quality?: number) {
-        if (!isChatbubbleExportFormatSupportedWithoutFFmpeg(format)) throw new Error("uhh bad fixme handle");
-        const offscreen = makeCanvas(this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution), OffscreenCanvas);
-        const renderer = new ChatbubbleCanvasRenderer(this.configuration, DrawingMode.Final, offscreen.canvas, offscreen.context);
-        return renderer.export(filename, format, quality);
+
+    public async export(filename: string, format: ChatbubbleExportFormat = this.configuration.format, quality?: number): Promise<File> {
+        const needsFFmpeg = !isChatbubbleExportFormatSupportedWithoutFFmpeg(format) || this.configuration.file.type.startsWith("video");
+        if (!needsFFmpeg) {
+            const offscreen = makeCanvas(this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution), OffscreenCanvas);
+            const renderer = new ChatbubbleCanvasRenderer(this.configuration, DrawingMode.Final, offscreen.canvas, offscreen.context);
+            renderer.drawImage();
+            renderer.drawBubble();
+            return renderer.export(filename, format, quality);
+        }
+
+        if (!(await Native.isFFmpegSupported())) {
+            // TODO: UI for errors
+            alert("ermmm,,,, ffmpeg pls");
+            throw new Error("ff-mpreg!!!!");
+        }
+
+
+        const transparent = this.configuration.fill === ChatbubbleConfiguration.TRANSPARENT;
+        const bubble = (() => {
+            const bounds = roundSpacial(this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution), Math.trunc);
+            const offscreen = makeCanvas(bounds, OffscreenCanvas);
+            const renderer = new ChatbubbleCanvasRenderer(this.configuration, DrawingMode.Final, offscreen.canvas, offscreen.context);
+            if (transparent && format.toString().startsWith("video")) {
+                renderer.context.globalCompositeOperation = "source-over";
+                renderer.context.fillStyle = "black";
+                renderer.context.fillRect(0, 0, renderer.canvas.width, renderer.canvas.height);
+            }
+            renderer.updateDrawStyle();
+            renderer.drawBubble();
+            const pixels = new Uint8Array(renderer.context.getImageData(0, 0, offscreen.canvas.width, offscreen.canvas.height).data);
+            return { pixels, bounds };
+        })();
+
+        const { output, failure } = await Native.ffmpeg({
+            file: {
+                mime: this.configuration.file.type,
+                data: new Uint8Array(await this.configuration.file.arrayBuffer()),
+            },
+            target: {
+                crop: roundSpacial(this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution), Math.trunc),
+                type: format
+            },
+            overlay: {
+                transparent,
+                ...bubble
+            }
+        });
+
+        if (failure) throw failure;
+
+        const extension = format.slice(format.indexOf("/") + 1);
+        return new File([output], filename + "." + extension, {
+            lastModified: Date.now(),
+            type: format,
+        });
     }
 }
 
@@ -603,30 +706,62 @@ function useOnSizeChange(element: HTMLElement, callback: () => void) {
     useEffect(() => () => observer.disconnect());
 }
 
+function getContainFitVideo(video: HTMLVideoElement) {
+    const canonical = video.videoWidth / video.videoHeight;
+    const stretched = video.clientWidth / video.clientHeight;
+
+    let width: number;
+    let height: number;
+    if (canonical > stretched) {
+        width = video.clientWidth;
+        height = video.clientWidth / stretched;
+    } else {
+        width = video.clientHeight * canonical;
+        height = video.clientHeight;
+    }
+
+    return { width, height };
+}
+
+
 function ChatbubbleEditor({ chatbubble }: { chatbubble: Chatbubble; }) {
-    const { configuration: { image, uncroppedResolution: resolution }, preview } = chatbubble;
+    const { configuration: { source, uncroppedResolution: resolution }, preview } = chatbubble;
+    const square = resolution.width / resolution.height === 1;
+    if (square) source.style.width = "100%"; // hack
+
     const dimmed = useMemo(() => {
-        const dimmed = image.cloneNode() as HTMLImageElement;
+        const dimmed = source.cloneNode() as HTMLImageElement;
         dimmed.classList.add(cl("crop-dimmed"));
         return dimmed;
-    }, [image]);
+    }, [source]);
 
-    useOnSizeChange(image, () => {
-        preview.resize(image);
+
+    useOnSizeChange(source, () => {
+        if (square) {
+            // hack
+            if (source.clientWidth > source.clientHeight) {
+                source.style.height = "100%";
+                source.style.width = String();
+            } else {
+                source.style.height = String();
+                source.style.width = "100%";
+            }
+        }
+        preview.resize((source instanceof HTMLImageElement) ? source : getContainFitVideo(source));
         draw();
     });
 
     function draw() {
         preview.clear();
-        preview.draw();
+        preview.drawBubble();
     }
 
     draw();
     return <>
-        {ReactWrapHTML("div", {}, [dimmed, image, preview.canvas as HTMLCanvasElement])}
-        <Points chatbubble={chatbubble} onChange={() => chatbubble.updateCropClip()} dimensions={resolution} color="#00FF00" list={ChatbubblePoints.List.Identifier.Crop} />
-        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} color="#0000FF" list={ChatbubblePoints.List.Identifier.Bezier} />
-        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} color="#FF0000" list={ChatbubblePoints.List.Identifier.Spike} />
+        {ReactWrapHTML("div", {}, [dimmed, source, preview.canvas as HTMLCanvasElement])}
+        <Points chatbubble={chatbubble} onChange={() => chatbubble.updateCropClip()} dimensions={resolution} list={ChatbubblePoints.List.Identifier.Crop} />
+        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} list={ChatbubblePoints.List.Identifier.Bezier} />
+        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} list={ChatbubblePoints.List.Identifier.Spike} />
     </>;
 }
 
@@ -635,7 +770,14 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
     chatbubble: Chatbubble;
 }) {
     const [format, setFormat] = useState(chatbubble.configuration.format);
-    useEffect(() => { format && (chatbubble.configuration.format = format); }, [format]);
+    useEffect(() => { chatbubble.configuration.format = format; }, [format]);
+    const [fillStyle, setFillStyle] = useState(chatbubble.configuration.fill);
+    useEffect(() => {
+        chatbubble.configuration.fill = fillStyle;
+        chatbubble.preview.updateDrawStyle();
+        chatbubble.preview.clear();
+        chatbubble.preview.drawBubble();
+    }, [fillStyle]);
 
     const colorButtonInputRef = useRef<HTMLInputElement>(null);
     const points = chatbubble.configuration.points();
@@ -643,7 +785,9 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
         <Select
             options={[
                 { value: ChatbubbleExportFormat.GIF, label: "GIF" },
-                { value: ChatbubbleExportFormat.PNG, label: "PNG" }
+                { value: ChatbubbleExportFormat.PNG, label: "PNG" },
+                { value: ChatbubbleExportFormat.MP4, label: "MP4" },
+                { value: ChatbubbleExportFormat.WEBM, label: "WEBM" },
             ]}
             placeholder={"Output Format"}
             maxVisibleItems={5}
@@ -653,18 +797,12 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
             select={v => { setFormat(v); }}
         />
         <Button>
-            {/* TODO: Find a way to import or immitate Discord's color picker. Or make my own, with alpha support. */}
+            {/* TODO: Find a way to import or imitate Discord's color picker. Or make my own, with alpha support. */}
             <input
                 ref={colorButtonInputRef}
-                value={chatbubble.configuration.fill.slice(0, "#".length + 6)}
+                value={fillStyle.slice(0, "#".length + 6)}
                 type="color"
-                onChange={e => {
-                    // todo: change color on this with the ref except make the text have contrast background
-                    chatbubble.configuration.fill = e.target.value as Color.Hex;
-                    chatbubble.preview.updateDrawStyle();
-                    chatbubble.preview.clear();
-                    chatbubble.preview.draw();
-                }}
+                onChange={event => setFillStyle(event.target.value as Color.Hex)}
             />
             <span>Edit Color</span>
         </Button>
@@ -678,24 +816,24 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
                 points.invert(ChatbubblePoints.List.Identifier.Bezier, { y: true });
                 points.invert(ChatbubblePoints.List.Identifier.Spike, { y: true });
                 chatbubble.preview.clear();
-                chatbubble.preview.draw();
+                chatbubble.preview.drawBubble();
             }}
         >Flip Vertically</Button >
     </>;
 }
 
 
-function Points({ chatbubble, color, dimensions, list, onChange: notifyChange }: {
+function Points({ chatbubble, dimensions, list, onChange: notifyChange }: {
     chatbubble: Chatbubble,
-    color: string;
     dimensions: Dimensions;
     list: ChatbubblePoints.List.Identifier;
     onChange: () => void;
 }) {
     const points = chatbubble.configuration.points(state => state[list]).normalized;
+    const color = ChatbubblePoints.List.VisualizationColors[list];
 
     return <div
-        data-listtype={list}
+        data-list-type={list}
         className={cl("editor-points", "contain")}
         style={{
             ["--vc-cb-editor-point-size" as never]: "10px",
@@ -705,6 +843,7 @@ function Points({ chatbubble, color, dimensions, list, onChange: notifyChange }:
     >
         {points.map((position, index) =>
             <DraggableNormalizedPointVisualization
+                color={color}
                 position={position}
                 onMove={position => { points[index] = position; notifyChange(); }}
             />
@@ -720,6 +859,7 @@ function DraggableNormalizedPointVisualization({
     position,
     onMove: escalatePositionInfo,
 }: {
+    color: string;
     position: CoordinateTuple;
     onMove: (position: CoordinateTuple) => void;
 }) {

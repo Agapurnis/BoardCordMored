@@ -19,12 +19,20 @@ import * as stream from "stream";
 import { promisify } from "util";
 const exec = promisify(child_process.exec);
 
-// import { getExitHook } from "@utils/dependencies";
-// import { defaultsDeep } from "lodash";
-const { defaultsDeep } = require("./lo.js");
+import { getExitHook } from "@utils/dependencies";
 import EventEmitter from "events";
-import exitHook, { asyncExitHook } from "exit-hook";
 import type { PartialDeep, TypedArray } from "type-fest";
+
+function defaultsDeep<T extends object, S extends object>(target: T, source: S): T & S {
+    for (const key in source) {
+        if (source[key] instanceof Object && key in target) {
+            (target as T & S)[key] = defaultsDeep((target as T & S)[key] as any, source[key] as unknown as object);
+        } else {
+            (target as T & S)[key] = source[key] as any;
+        }
+    }
+    return target as T & S;
+}
 
 import { assertUnreachable, ChatbubbleExportFormat, ChatbubbleFFmpegDelegationFailure, ChatbubbleFFmpegDelegationFailureKind, ChatbubbleFFmpegOptions, ChatbubbleFFmpegTime } from "./shared";
 function assertCompileTimeUnreachable(value?: never) { }
@@ -46,15 +54,15 @@ namespace Temporary {
         protected static readonly exitListeningManagers = new Set<WeakRef<FileManager>>();
         protected static exiting = false;
         static {
-            // getExitHook().then(({ asyncExitHook }) => {
-            asyncExitHook(async () => {
-                FileManager.exiting = true;
-                const time = process.hrtime.bigint();
-                const managers = [...FileManager.exitListeningManagers];// .reverse(); // TODO: Order in a more robust manner.
-                await Promise.all(managers.map(ref => ref.deref()?.cleanup()));
-                console.log("Cleanup: ", Number((process.hrtime.bigint() - time) / 10000n) / 100, "ms");
-            }, { wait: 25 /* ms */ });
-            // });
+            getExitHook().then(({ asyncExitHook }) => {
+                asyncExitHook(async () => {
+                    FileManager.exiting = true;
+                    const time = process.hrtime.bigint();
+                    const managers = [...FileManager.exitListeningManagers];// .reverse(); // TODO: Order in a more robust manner.
+                    await Promise.all(managers.map(ref => ref.deref()?.cleanup()));
+                    console.log("Cleanup: ", Number((process.hrtime.bigint() - time) / 10000n) / 100, "ms");
+                }, { wait: 25 /* ms */ });
+            });
         }
 
         public readonly config: FileManager.Configuration;
@@ -70,7 +78,7 @@ namespace Temporary {
         constructor(config:
             | FileManager.Configuration
             | FileManager.Configuration.PartialInputObject,
-            then?: (instace: FileManager) => void | Promise<void>
+            then?: (instance: FileManager) => void | Promise<void>
         ) {
             this.config = (config instanceof FileManager.Configuration) ? config : FileManager.Configuration.prepare(config);
             this.path = this.config.path;
@@ -495,7 +503,7 @@ async function tryGetFfmpegPath(): Promise<
     }
 }
 
-export class FFmpegSocket extends socketPipeFactory(fftemp) {
+class FFmpegSocket extends socketPipeFactory(fftemp) {
     // https://github.com/FFmpeg/FFmpeg/blob/6229e4ac425b4566446edefb67d5c225eb397b58/doc/protocols.texi#L2138-L2146
     public get url() { return "unix:" + this.path; }
 }
@@ -542,10 +550,10 @@ class FFmpegJob<T extends FFmpegJob.IO.Method = FFmpegJob.IO.Method> extends Eve
         return [new FFmpegJob({ binary, io, args }), null];
     }
 
-    private async read(): Promise<Uint8Array> {
+    private async read(): Promise<Buffer> {
         switch (this._io.method) {
             case FFmpegJob.IO.Method.TemporaryFiles: return await fsp.readFile(this._io.paths.out);
-            case FFmpegJob.IO.Method.Streaming: return new Uint8Array(Buffer.concat(this._io.chunks!));
+            case FFmpegJob.IO.Method.Streaming: return Buffer.concat(this._io.chunks!);
             default: assertUnreachable(this._io.method);
         }
     }
@@ -553,7 +561,7 @@ class FFmpegJob<T extends FFmpegJob.IO.Method = FFmpegJob.IO.Method> extends Eve
     constructor({ binary, io, args }: { binary: string, io: FFmpegJob.IO<T>, args: string[]; }) {
         super();
         this._io = io;
-        this.output = this.waiting.promise.then(this.read.bind(this));
+        this.output = this.waiting.promise.then(_ => this.read().then(buffer => new Uint8Array(buffer)));
         this.output.then(data => {
             this.emit("success", data);
         });
@@ -606,6 +614,7 @@ class FFmpegJob<T extends FFmpegJob.IO.Method = FFmpegJob.IO.Method> extends Eve
         let lastChunkPortion = String();
         this.process.stderr.on("data", (chunk: Buffer) => {
             const string = lastChunkPortion + chunk.toString("utf-8");
+            console.log(string);
             lastChunkPortion = string.slice(-25);
             if (!foundMainLength) {
                 if (!foundMain && string.includes("Input #0")) foundMain = true;
@@ -650,7 +659,8 @@ namespace FFmpegJob {
         }): FFmpegJob.IO.Method {
             if (
                 (inputMime.startsWith("video") && exportType === ChatbubbleExportFormat.GIF) || // need entire for palette gen across video ?? idk actually i need more reseach
-                (exportType === ChatbubbleExportFormat.MP4) // fragment are stinky
+                (exportType === ChatbubbleExportFormat.MP4) || // fragment are stinky
+                (exportType === ChatbubbleExportFormat.WEBM)
             ) return FFmpegJob.IO.Method.TemporaryFiles;
 
             return FFmpegJob.IO.Method.Streaming;
@@ -660,7 +670,7 @@ namespace FFmpegJob {
             const chunks = new Array<Uint8Array>();
             const writable = new stream.Writable({
                 write(chunk, encoding, callback) {
-                    if (!(chunk instanceof Uint8Array)) throw new Error("Recieved unexpected data type!");
+                    if (!(chunk instanceof Uint8Array)) throw new Error("Received unexpected data type!");
                     chunks.push(chunk);
                     callback();
                 }
@@ -733,40 +743,62 @@ namespace FFmpegJob {
     function outputSpecificationToFfmpegArguments(type: ChatbubbleExportFormat, quality?: number) {
         // TODO: quality
         switch (type) {
-            case ChatbubbleExportFormat.WEBM: return ["-c:a", "libvorbis", "-c:v", "libvpx-vp9", "-f", "webm", "-auto-alt-ref", "0"];
-            case ChatbubbleExportFormat.MP4: return ["-c:v", "libx265", "-f", "mp4"]; // todo: fallback to 264 if no 265 (actually i think 264 would just be better to support mobile)
+            case ChatbubbleExportFormat.WEBM: {
+                const out = ["-c:a", "libvorbis", "-c:v"];
+                out.push("libvpx"); // todo: option for vp9
+                out.push("-f", "webm", "-auto-alt-ref", "0");
+                out.push("-cpu-used", "-5", "-deadline", "realtime");
+                return out;
+            }
+            case ChatbubbleExportFormat.MP4: {
+                const out = ["-c:v"];
+                if (os.platform() === "darwin") out.push("hevc_videotoolbox", "-alpha_quality", "1", "-vtag", "hvc1", "-c:a", "aac", "-pix_fmt", "yuva444p", "-profile:v", "main", "-realtime", "true");
+                // TODO
+                out.push("-f", "mp4", "-movflags", "+faststart");
+                return out;
+            }
             case ChatbubbleExportFormat.GIF: return ["-f", "gif"];
             case ChatbubbleExportFormat.PNG: return ["-f", "apng"]; // uhh how do i do normal png this is wasteful
             default: assertUnreachable(type);
         }
     }
 
-    export function buildArguments(io: IO<FFmpegJob.IO.Method>, { overlay, target: { type, quality, crop, trim } }: ChatbubbleFFmpegOptions): string[] {
-        // TODO: Audio copying, video looping, trimming.
+    export function buildArguments(io: IO<FFmpegJob.IO.Method>, { file, overlay, target: { type, quality, crop } }: ChatbubbleFFmpegOptions): string[] {
+        // TODO: Adding audio, GIF looping, trimming.
+        const img2vid = file.mime.startsWith("image") && type.startsWith("video");
         const args: string[] = [];
         args.push("-progress", "-", "-nostats");// , "-loglevel", "error");
         args.push("-y");
+        if (img2vid) args.push("-loop", "1");
         args.push("-i", io.paths.main);
         args.push("-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${overlay.bounds.width}x${overlay.bounds.height}`, "-i", io.paths.bubble);
-        let filter = String(); let last = "0";
-        if (crop) { filter += `[${last}]crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}[cropped];`; last = "cropped"; }
-        filter += `[${last}][1]overlay=${overlay.bounds.x}:${overlay.bounds.y}[overlaid];`; last = "overlaid";
+        let filter = String(); let last = "0"; const last_bubble = "1";
+        filter += `[${last}]crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}:exact=1[cropped];`; last = "cropped";
+        if (overlay.transparent && type !== ChatbubbleExportFormat.GIF) {
+            filter += `[${last_bubble}]alphaextract[trans];[${last}][trans]alphamerge[overlaid];`; last = "overlaid";
+        } else {
+            filter += `[${last}][${last_bubble}]overlay=${overlay.bounds.x}:${overlay.bounds.y}[overlaid];`; last = "overlaid";
+        }
         if (type === ChatbubbleExportFormat.GIF) {
             // https://superuser.com/a/1323430
             filter += `[${last}]split=[a][b];[a]palettegen[pal];[b][pal]paletteuse[paletted];`; last = "paletted";
         }
         args.push("-filter_complex", filter);
         args.push("-map", `[${last}]`);
+        args.push("-map", "0:a?"); // TODO: Allow custom audio for image/gif => video
         args.push(...outputSpecificationToFfmpegArguments(type, quality));
+        if (img2vid) args.push("-t", "60");
         args.push(io.paths.out);
+        console.log(args);
+
         return args;
     }
 }
 
 let job: FFmpegJob | Nullish;
 let err: ChatbubbleFFmpegDelegationFailure | Nullish;
-exitHook(() => job?.life.abort());
-export async function ffmpeg(/* _: IpcMainInvokeEvent, */options: ChatbubbleFFmpegOptions): Promise<
+getExitHook().then(m => m.default(() => job?.life.abort()));
+export async function ffmpeg(_: IpcMainInvokeEvent, options: ChatbubbleFFmpegOptions): Promise<
     | { failure?: never, output: Uint8Array; }
     | { failure: ChatbubbleFFmpegDelegationFailure; output?: never; }
 > {
@@ -774,40 +806,38 @@ export async function ffmpeg(/* _: IpcMainInvokeEvent, */options: ChatbubbleFFmp
     [job, err] = await FFmpegJob.for(options);
     if (err) return { failure: err };
     return new Promise(resolve => {
-        job!.on("success", output => {
-            console.log({ output });
-            resolve({ output });
-        });
-        job!.on("failure", failure => {
-            console.log(failure);
-            resolve({ failure });
-        });
+        job!.on("success", output => resolve({ output }));
+        job!.on("failure", failure => resolve({ failure }));
     });
 }
 
+export async function isFFmpegSupported(_: IpcMainInvokeEvent): Promise<boolean> {
+    const [binary] = await tryGetFfmpegPath();
+    return binary !== null;
+}
 
-const main = await fsp.readFile("/Users/katini/Downloads/sky_dicking.gif");
-const bubble = await fsp.readFile("/Users/katini/Downloads/bubble.rgba");
+// const main = await fsp.readFile("/Users/katini/Downloads/sky_dicking.gif");
+// const bubble = await fsp.readFile("/Users/katini/Downloads/bubble.rgba");
 
-const { output, failure } = await ffmpeg({
-    overlay: {
-        transparent: true,
-        bounds: { x: 0, y: 0, width: 800, height: 341 },
-        pixels: new Uint8Array(bubble.buffer),
-    },
-    file: {
-        mime: "video/webm",
-        data: main,
-        name: "jor",
-    },
-    target: {
-        trim: [null, null], // TODO
-        type: ChatbubbleExportFormat.GIF,
-    }
-});
-if (failure) console.log(failure);
-fs.writeFileSync("/Users/katini/Downloads/aaa.gif", output!);
-console.log("Done!");
+// const { output, failure } = await ffmpeg({
+//     overlay: {
+//         transparent: true,
+//         bounds: { x: 0, y: 0, width: 800, height: 341 },
+//         pixels: new Uint8Array(bubble.buffer),
+//     },
+//     file: {
+//         mime: "video/webm",
+//         data: main,
+//         name: "jor",
+//     },
+//     target: {
+//         trim: [null, null], // TODO
+//         type: ChatbubbleExportFormat.GIF,
+//     }
+// });
+// if (failure) console.log(failure);
+// fs.writeFileSync("/Users/katini/Downloads/aaa.gif", output!);
+// console.log("Done!");
 
 
 export async function evaluate(event: IpcMainInvokeEvent, string: string) {

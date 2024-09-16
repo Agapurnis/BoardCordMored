@@ -44,18 +44,14 @@ type FFmpegDelegationFailureVariants =
 export type ChatbubbleFFmpegDelegationFailure<T extends ChatbubbleFFmpegDelegationFailureKind = ChatbubbleFFmpegDelegationFailureKind>
     = Extract<FFmpegDelegationFailureVariants, { type: T; }>;
 
-type FFmpegTime = [hours: number, minutees: number, seconds: number, fraction: number];
-
 export interface ChatbubbleFFmpegOptions {
     file: {
-        name: string,
         mime: string,
         data: Uint8Array;
     };
     target: {
-        trim: [start: FFmpegTime | null, end: FFmpegTime | null];
         type: ChatbubbleExportFormat,
-        crop?: Rectangle,
+        crop: Rectangle,
         quality?: number;
     };
     overlay: {
@@ -136,6 +132,12 @@ export namespace ChatbubblePoints {
             [Identifier.Spike]: NormalizedPointList<Spike>;
             [Identifier.Crop]: NormalizedPointList<Crop>;
         }
+
+        export const VisualizationColors = {
+            [Identifier.Bezier]: "#0000FF",
+            [Identifier.Spike]: "#FF0000",
+            [Identifier.Crop]: "#00FF00"
+        } satisfies Record<Identifier, string>;
 
         export type CubicBezier = Tuple<CoordinateTuple, 4>;
         export type Crop = Tuple<CoordinateTuple, 2>;
