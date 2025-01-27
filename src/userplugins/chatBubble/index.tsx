@@ -10,6 +10,7 @@ import { findGroupChildrenByChildId, NavContextMenuPatchCallback } from "@api/Co
 import { Upload } from "@api/MessageEvents";
 import { definePluginSettings } from "@api/Settings";
 import { classNameFactory } from "@api/Styles";
+import { CheckedTextInput } from "@components/CheckedTextInput";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { SpeechIcon } from "@components/Icons";
 import { Devs } from "@utils/constants";
@@ -17,7 +18,7 @@ import { Logger } from "@utils/Logger";
 import { ModalCloseButton, ModalContent, ModalFooter, ModalHeader, ModalProps, ModalRoot, openModal, openModalLazy } from "@utils/modal";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import { findByCodeLazy } from "@webpack";
-import { Alerts, Button, lodash, Menu, React, Select, Text, UploadManager, useEffect, useMemo, useRef, useState, zustandCreate } from "@webpack/common";
+import { Alerts, Button, Forms, lodash, Menu, React, Select, Text, UploadManager, useEffect, useMemo, useRef, useState, zustandCreate } from "@webpack/common";
 import { Channel, Message } from "discord-types/general";
 import { applyPalette, Encoder, GIFEncoder, quantize } from "gifenc";
 import { Flatten } from "ts-pattern/dist/types/helpers";
@@ -27,11 +28,25 @@ type CoordinateTuple = ChatbubblePoints.CoordinateTuple;
 type NormalizedPointList<T extends CoordinateTuple[] = CoordinateTuple[]> = ChatbubblePoints.NormalizedPointList<T>;
 const { NormalizedPointList } = ChatbubblePoints;
 
+type Canvas =
+    | HTMLCanvasElement
+    | OffscreenCanvas;
+
+type CanvasContext2D =
+    | CanvasRenderingContext2D
+    | OffscreenCanvasRenderingContext2D;
+
+type StrokeStyle = CanvasContext2D["strokeStyle"];
+
 declare const BRAND: unique symbol;
 type Branded<T> = { [BRAND]: T; };
 type Brand<T, U> = T & Branded<U>;
 
 namespace Color {
+    export const TRANSPARENT = "#000000FF";
+    export const BLACK = "#000000";
+    export const WHITE = "#FFFFFF";
+
     export type Hex = `#${string}`;
     export type Packed = Brand<number, "PackedColor">;
     const colorEncodingBuffer = new ArrayBuffer(4);
@@ -75,6 +90,35 @@ function ReactWrapHTML(type: string, props: Record<string, unknown>, children: H
     });
 }
 
+type SupportedMediaElement =
+    | HTMLImageElement
+    | HTMLVideoElement;
+
+function getNaturalDimensions(element: SupportedMediaElement): Dimensions {
+    if (element instanceof HTMLImageElement) {
+        return {
+            width: element.naturalWidth,
+            height: element.naturalHeight,
+        };
+    } else {
+        if (element.readyState < HTMLMediaElement.HAVE_METADATA) {
+            throw new Error("Dimensions cannot be retrieved; relevant metadata has not yet arrived.");
+        }
+
+        return {
+            width: element.videoWidth,
+            height: element.videoHeight
+        };
+    }
+}
+
+function getClientDimensions(element: HTMLElement): Dimensions {
+    return {
+        width: element.clientWidth,
+        height: element.clientHeight,
+    };
+}
+
 function roundSpacial<T extends Dimensions | Rectangle>(spacial: T, round: (n: number) => number = Math.round, clone = [Object, null].includes(Reflect.getPrototypeOf(spacial) as any)): T {
     if (clone) spacial = lodash.pick(spacial, "x", "y", "width", "height") as T;
     if ("x" in spacial) {
@@ -85,6 +129,43 @@ function roundSpacial<T extends Dimensions | Rectangle>(spacial: T, round: (n: n
     spacial.height = round(spacial.height);
     return spacial;
 }
+
+function divideSpacial<T extends Dimensions | Rectangle>(left: T, right: Dimensions, clone: boolean): T {
+    if (clone) left = lodash.pick(left, "x", "y", "width", "height") as T;
+    left.width /= right.width;
+    left.height /= right.height;
+    if ("x" in left) {
+        left.x /= right.width;
+        left.y /= right.height;
+    }
+    return left;
+}
+function multiplySpacial<T extends Dimensions | Rectangle>(left: T, scalar: number, clone: boolean): T {
+    if (clone) left = lodash.pick(left, "x", "y", "width", "height") as T;
+    left.width *= scalar;
+    left.height *= scalar;
+    if ("x" in left) {
+        left.x *= scalar;
+        left.y *= scalar;
+    }
+    return left;
+}
+function unitSpacial<T extends Dimensions | Rectangle>(spacial: T, clone: boolean): T {
+    if (clone) spacial = lodash.pick(spacial, "x", "y", "width", "height") as T;
+    if ("x" in spacial) {
+        spacial.x /= spacial.width;
+        spacial.y /= spacial.height;
+    }
+    if (spacial.height > spacial.width) {
+        spacial.height = 1;
+        spacial.width /= spacial.height;
+    } else {
+        spacial.height /= spacial.width;
+        spacial.width = 1;
+    }
+    return spacial;
+}
+
 
 function load<T extends
     | HTMLImageElement
@@ -105,13 +186,19 @@ function load<T extends
             if (autoRevoke) URL.revokeObjectURL(url);
             resolve(media);
         };
+        if (type === HTMLVideoElement) {
+            (media as HTMLVideoElement).defaultMuted = true;
+            (media as HTMLVideoElement).muted = true;
+            (media as HTMLVideoElement).autoplay = true;
+            (media as HTMLVideoElement).loop = true;
+        }
         media.src = url;
     });
 }
 
 function makeCanvas(dimensions: Dimensions, type: typeof OffscreenCanvas): { canvas: OffscreenCanvas, context: OffscreenCanvasRenderingContext2D; };
 function makeCanvas(dimensions: Dimensions, type: typeof HTMLCanvasElement): { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D; };
-function makeCanvas({ width, height }: Dimensions, type: typeof OffscreenCanvas | typeof HTMLCanvasElement): { canvas: HTMLCanvasElement | OffscreenCanvas, context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D; } {
+function makeCanvas({ width, height }: Dimensions, type: typeof OffscreenCanvas | typeof HTMLCanvasElement): { canvas: Canvas, context: CanvasContext2D; } {
     let canvas: HTMLCanvasElement | OffscreenCanvas;
     if (type === OffscreenCanvas) {
         canvas = new OffscreenCanvas(width, height);
@@ -120,8 +207,9 @@ function makeCanvas({ width, height }: Dimensions, type: typeof OffscreenCanvas 
         canvas.width = width;
         canvas.height = height;
         canvas.classList.add(cl("contain"));
+        canvas.classList.add(cl("contain-force"));
     }
-    const context = canvas.getContext("2d") as OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
+    const context = canvas.getContext("2d") as CanvasContext2D;
     if (!context) throw new Error("Could not get 2D canvas rendering context!");
     return { canvas, context };
 }
@@ -297,20 +385,8 @@ class LazyDirtyable<T> {
 }
 
 
-interface ChatbubblePointStore extends ChatbubblePoints.List.Entries {
-    invert(list: ChatbubblePoints.List.Identifier, ...details: Parameters<NormalizedPointList["inverted"]>): void;
-}
-function makePointStore(initial: ChatbubblePoints.List.Entries) {
-    const use = zustandCreate<ChatbubblePointStore>(set => ({
-        ...initial,
-        invert: (list, ...details) => set(state => ({ [list]: state[list].inverted(...details) })),
-    }));
-    return use;
-}
-
-
-const TRANSPARENT_CHECKERBOARD_LIGHT = "#EDEDEDC8";
-const TRANSPARENT_CHECKERBOARD_DARK = "#FFFFFFC8";
+const TRANSPARENT_CHECKERBOARD_LIGHT = "#EDEDED";
+const TRANSPARENT_CHECKERBOARD_DARK = "#FFFFFF";
 function makeCheckerboardTransparencyPattern(size: number) {
     const { canvas, context } = makeCanvas({ width: size, height: size }, OffscreenCanvas);
     const half = size / 2;
@@ -329,56 +405,7 @@ const enum DrawingMode {
     Final
 }
 
-class ChatbubbleCanvasRenderer {
-    protected drawOutline(points: ChatbubblePoints.List.Identifier, style: string) {
-        const normalized = this.configuration.points.getState()[points];
-        const scaled = normalized.mul(this.canvas);
-        this.context.strokeStyle = style;
-        this.context.beginPath();
-        this.context.moveTo(...scaled[0]);
-        for (const point of scaled.slice(1)) {
-            this.context.lineTo(...point);
-        }
-        this.context.stroke();
-    }
-
-    protected drawBezier() {
-        const normalized = this.configuration.points.getState()[ChatbubblePoints.List.Identifier.Bezier];
-        const scaled = normalized.toSpace(this.getOffsetCanvasSpace());
-        this.context.beginPath();
-        const [start, ...curve] = scaled;
-        this.context.moveTo(...start);
-        this.context.bezierCurveTo(...curve.flat() as Flatten<typeof curve>);
-        this.context.closePath();
-        this.context.fill();
-    }
-
-    protected drawSpike() {
-        const normalized = this.configuration.points.getState()[ChatbubblePoints.List.Identifier.Spike];
-        const scaled = normalized.toSpace(this.getOffsetCanvasSpace());
-        this.context.beginPath();
-        this.context.moveTo(...scaled[0]);
-        for (const point of scaled.slice(1)) {
-            this.context.lineTo(...point);
-        }
-        this.context.fill();
-    }
-
-    protected drawBubbleLines() {
-        for (const list of [
-            ChatbubblePoints.List.Identifier.Spike,
-            ChatbubblePoints.List.Identifier.Bezier,
-        ]) this.drawOutline(list, ChatbubblePoints.List.VisualizationColors[list]);
-    }
-
-    public drawBubble() {
-        this.drawSpike();
-        this.drawBezier();
-        if (this.mode === DrawingMode.Preview) {
-            this.drawBubbleLines();
-        }
-    }
-
+class ChatbubbleCanvasRenderer implements CanvasRenderingEnvironment {
     public clear() {
         this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
     }
@@ -391,7 +418,72 @@ class ChatbubbleCanvasRenderer {
             x, y, this.canvas.width, this.canvas.height,
             0, 0, this.canvas.width, this.canvas.height
         );
-        this.updateDrawStyle();
+    }
+
+    public drawBubbleStroke(path: Path2D) {
+        this.context.globalAlpha = 1;
+        this.context.globalCompositeOperation = "source-over";
+        this.context.lineWidth = this.configuration.stroke.width;
+        this.context.strokeStyle = this.configuration.stroke.color;
+        this.context.stroke(path);
+    }
+
+    public drawBubble({ stroke: strokeForceDisable }: { stroke?: false; } = {}): Path2D {
+        const transparent = this.configuration.fill === Color.TRANSPARENT;
+        const offscreen = this.mergeOffscreen.getContext("2d")!;
+        offscreen.clearRect(0, 0, offscreen.canvas.width, offscreen.canvas.height);
+
+        const path = new Path2D();
+        const space = this.getOffsetCanvasSpace();
+        const shapes = this.configuration.shapes.getState().list;
+
+        offscreen.fillStyle = transparent
+            ? (this.mode === DrawingMode.Final)
+                ? Color.BLACK
+                : this.transparencyPattern.get()
+            : this.configuration.fill;
+
+        for (const shape of shapes) {
+            if (!(shape instanceof AbstractDrawnPathedShape)) {
+                throw new Error("Unsupported shape! :c");
+            }
+            shape.draw(offscreen, space, { fill: true });
+            path.addPath(shape.getPath(space));
+        }
+
+        const { stroke } = this.configuration;
+        const doDrawStroke = (strokeForceDisable === false) && stroke.color !== Color.TRANSPARENT && stroke.width > 0;
+        if (doDrawStroke) this.drawBubbleStroke(path);
+        if (transparent) {
+            if (this.mode === DrawingMode.Final) {
+                this.context.globalCompositeOperation = "destination-out";
+            } else {
+                if (doDrawStroke) {
+                    this.context.globalAlpha = 1;
+                    this.context.globalCompositeOperation = "destination-out";
+                    this.context.drawImage(offscreen.canvas, 0, 0);
+                }
+
+                this.context.globalCompositeOperation = "screen";
+                this.context.globalAlpha = 0.8;
+            }
+        }
+        this.context.drawImage(offscreen.canvas, 0, 0);
+        if (transparent) {
+            this.context.globalCompositeOperation = "source-over";
+            this.context.globalAlpha = 1;
+        }
+
+        if (this.mode === DrawingMode.Preview) {
+            for (const shape of shapes) {
+                shape.draw(this.context, space, { stroke: "#00FF00", lineWidth: 3 });
+                if (shape instanceof DrawnBezierCurve) {
+                    shape.drawControlLines(this.context, space, { stroke: "blue" });
+                }
+            }
+        }
+
+        return path;
     }
 
     protected exportGIF(): Encoder {
@@ -450,7 +542,8 @@ class ChatbubbleCanvasRenderer {
         ) return;
         this.canvas.width = dimensions.width;
         this.canvas.height = dimensions.height;
-        this.updateDrawStyle();
+        this.mergeOffscreen.width = dimensions.width;
+        this.mergeOffscreen.height = dimensions.height;
     }
 
     public getOffsetCanvasSpace(): Rectangle {
@@ -473,36 +566,29 @@ class ChatbubbleCanvasRenderer {
         return this.context.createPattern(checkerboard, "repeat")!;
     });
 
-    public updateDrawStyle() {
-        const transparent = this.configuration.fill.match(/^#......FF$/);
-        if (this.mode === DrawingMode.Final && transparent) {
-            this.context.globalCompositeOperation = "destination-out";
-            this.context.fillStyle = "black";
-        } else {
-            this.context.globalCompositeOperation = "source-over";
-            this.context.fillStyle = transparent ? this.transparencyPattern.get() : this.configuration.fill;
-        }
+    protected mergeOffscreen: OffscreenCanvas;
+
+    public get canvas(): Canvas {
+        return this.context.canvas;
     }
 
     constructor(
         public readonly configuration: ChatbubbleConfiguration,
         protected readonly mode: DrawingMode,
-        public readonly canvas: HTMLCanvasElement | OffscreenCanvas,
-        public readonly context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
+        public readonly context: CanvasContext2D,
     ) {
-        this.updateDrawStyle();
+        this.mergeOffscreen = new OffscreenCanvas(this.canvas.width, this.canvas.height);
     }
 }
 
 class ChatbubbleConfiguration {
-    public static readonly TRANSPARENT = "#000000FF" as Color.Hex;
     public static async forFile(file: File) {
         type MediaConstructor = new () => ConstructorParameters<typeof ChatbubbleConfiguration>[1];
         const media = await load((file.type.startsWith("image")
             ? HTMLImageElement
             : HTMLVideoElement
         ) as MediaConstructor, file, { autoRevoke: false });
-        media.classList.add(cl("contain"));
+        media.classList.add(cl("contain"), cl("contain-force"));
         return new ChatbubbleConfiguration(file, media);
     }
 
@@ -511,18 +597,7 @@ class ChatbubbleConfiguration {
         public readonly file: File,
         public readonly source: HTMLImageElement | HTMLVideoElement,
     ) {
-        if (source instanceof HTMLImageElement) {
-            this.uncroppedResolution = Object.seal({
-                width: source.naturalWidth,
-                height: source.naturalHeight
-            });
-        } else {
-            // not really but uh
-            this.uncroppedResolution = Object.seal({
-                width: source.videoWidth,
-                height: source.videoHeight
-            });
-        }
+        this.uncroppedResolution = Object.seal(getNaturalDimensions(source));
     }
 
     public removeCropClip() {
@@ -534,8 +609,11 @@ class ChatbubbleConfiguration {
         this.source.style.clipPath = "xywh(" + [x, y, width, height].map(n => (n * 100) + "%").join(" ") + ")";
     }
 
-    public getCroppedRectangle(scale: Dimensions) {
-        const [a, b] = this.points.getState()[ChatbubblePoints.List.Identifier.Crop].mul(scale);
+    public getCroppedRectangle(scale: Dimensions): Rectangle;
+    public getCroppedRectangle(space: Rectangle): Rectangle;
+    public getCroppedRectangle(space: Rectangle | Dimensions) {
+        const { corners } = this.crop.getState();
+        const [a, b] = "x" in space ? corners.toSpace(space) : corners.mul(space);
         const [xlo, xhi] = a[0] < b[0] ? [a[0], b[0]] : [b[0], a[0]]; const w = xhi - xlo;
         const [ylo, yhi] = a[1] < b[1] ? [a[1], b[1]] : [b[1], a[1]]; const h = yhi - ylo;
         return {
@@ -546,14 +624,62 @@ class ChatbubbleConfiguration {
         };
     }
 
-    public fill = ChatbubbleConfiguration.TRANSPARENT;
+
+    public stroke: { color: Color.Hex, width: number; } = { color: Color.BLACK, width: 0 };
+    public fill = Color.TRANSPARENT;
     public format = ChatbubbleExportFormat.GIF;
-    public readonly points = makePointStore({
-        [ChatbubblePoints.List.Identifier.Crop]: new NormalizedPointList([[0, 0], [1, 1]]),
-        [ChatbubblePoints.List.Identifier.Bezier]: new NormalizedPointList([[0, 0], [.25, .4], [0.75, .4], [1, 0]]),
-        [ChatbubblePoints.List.Identifier.Spike]: new NormalizedPointList([[.25, 0], [.5, .5], [.75, 0]])
+    public readonly crop = zustandCreate<CropStore>((set, get) => ({
+        corners: new NormalizedPointList([[0, 0], [1, 1]]),
+        editing: null,
+    }));
+    public readonly shapes = zustandCreate<ShapesStore>((set, get) => {
+        return {
+            selected: new Set(),
+            list: [
+                new DrawnBezierCurve(new NormalizedPointList([[0, 0], [.25, .4], [0.75, .4], [1, 0]])),
+                new DrawnPolygon<3>(new NormalizedPointList([[.25, 0], [.5, .5], [.75, 0]]))
+            ],
+
+            invert(details) {
+                set({
+                    list: get().list.map(shape => {
+                        if (shape instanceof DrawnPolygon) {
+                            shape.normalizedPoints = shape.normalizedPoints.inverted(details);
+                        } else {
+                            throw new Error("Inversion operation is unimplemented for the provided shape!");
+                        }
+                        return shape;
+                    })
+                });
+            },
+
+            move(shapeIndex, amount) {
+                const old = get();
+                const shape = old.list[shapeIndex] as DrawnPolygon;
+                const clone = shape.cloneShallow();
+                clone.normalizedPoints = new NormalizedPointList(shape.normalizedPoints.normalized.map(point => [
+                    (point as [number, number])[0] + amount[0],
+                    (point as [number, number])[1] + amount[1]
+                ]));
+                set({ list: old.list.with(shapeIndex, clone) });
+            }
+        };
     });
 }
+
+interface ShapesStore {
+    selected: Set<number>, // shape indices
+    list: AbstractDrawnShape[],
+
+    invert(details: Parameters<NormalizedPointList["inverted"]>[0]): void;
+    move(shapeIndex: number, amount: CoordinateTuple): void;
+}
+
+interface CropStore {
+    corners: NormalizedPointList<[tl: CoordinateTuple, br: CoordinateTuple]>,
+    editing: Corner | null,
+}
+
 
 class Chatbubble {
     public static readonly fileMapped = new Map<File, Chatbubble>();
@@ -578,11 +704,9 @@ class Chatbubble {
         public readonly configuration: ChatbubbleConfiguration
     ) {
         this.associatedFile = configuration.file;
-        const dimensions = configuration.source instanceof HTMLImageElement
-            ? configuration.source
-            : { width: 10, height: 10 }; // It'll figure itself out...
+        const dimensions = getNaturalDimensions(this.configuration.source);
         const preview = makeCanvas(dimensions, HTMLCanvasElement);
-        this.preview = new ChatbubbleCanvasRenderer(configuration, DrawingMode.Preview, preview.canvas, preview.context);
+        this.preview = new ChatbubbleCanvasRenderer(configuration, DrawingMode.Preview, preview.context);
         this.updateCropClip();
     }
 
@@ -601,13 +725,14 @@ class Chatbubble {
 
         if (!needsFFmpeg && !(hasFFmpeg && format === ChatbubbleExportFormat.GIF)) {
             const offscreen = makeCanvas(this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution), OffscreenCanvas);
-            const renderer = new ChatbubbleCanvasRenderer(this.configuration, DrawingMode.Final, offscreen.canvas, offscreen.context);
+            const renderer = new ChatbubbleCanvasRenderer(this.configuration, DrawingMode.Final, offscreen.context);
             renderer.drawImage();
             renderer.drawBubble();
             return renderer.export(filename, format, quality);
         }
 
-        // TODO: the path thing doesnt work if i dont launch it from terminal
+        // TODO: the path thing does'nt work if i don't launch it from terminal
+        // maybe spawn a shell itself? ahaha. or pwd or something (no, that wouldn't be it.,,, idk)
         if (!hasFFmpeg) {
             // TODO: UI for errors
             alert("ermmm,,,, ffmpeg pls");
@@ -615,17 +740,16 @@ class Chatbubble {
         }
 
 
-        const transparent = this.configuration.fill === ChatbubbleConfiguration.TRANSPARENT;
+        const transparent = this.configuration.fill === Color.TRANSPARENT;
         const bubble = (() => {
             const bounds = roundSpacial(this.configuration.getCroppedRectangle(this.configuration.uncroppedResolution), Math.trunc);
             const offscreen = makeCanvas(bounds, OffscreenCanvas);
-            const renderer = new ChatbubbleCanvasRenderer(this.configuration, DrawingMode.Final, offscreen.canvas, offscreen.context);
+            const renderer = new ChatbubbleCanvasRenderer(this.configuration, DrawingMode.Final, offscreen.context);
             if (transparent && (format.toString().startsWith("video") || format === ChatbubbleExportFormat.GIF)) {
                 renderer.context.globalCompositeOperation = "source-over";
-                renderer.context.fillStyle = "black";
+                renderer.context.fillStyle = Color.BLACK;
                 renderer.context.fillRect(0, 0, renderer.canvas.width, renderer.canvas.height);
             }
-            renderer.updateDrawStyle();
             renderer.drawBubble();
             const pixels = new Uint8Array(renderer.context.getImageData(0, 0, offscreen.canvas.width, offscreen.canvas.height).data);
             return { pixels, bounds };
@@ -694,29 +818,39 @@ function EditorModal({ modal, close, chatbubble }: {
     </ErrorBoundary >;
 }
 
-function useOnSizeChange(element: HTMLElement, callback: () => void) {
-    const observer = new ResizeObserver(callback);
+function useOnSizeChange(element: HTMLElement, callback: (entry: ResizeObserverEntry, dimensionChange: boolean) => void) {
+    const last: Dimensions = { height: element.clientHeight, width: element.clientWidth };
+    const observer = new ResizeObserver(([entry]) => {
+        const changed = last.height !== element.clientHeight || last.width !== element.clientWidth;
+        last.height = element.clientHeight;
+        last.width = element.clientWidth;
+        callback(entry, changed);
+    });
     observer.observe(element);
     useEffect(() => () => observer.disconnect());
 }
 
-function getContainFit(element: HTMLElement, resolution: Dimensions) {
-    const canonical = resolution.width / resolution.height;
-    const stretched = element.clientWidth / element.clientHeight;
+function getContainFit(element: SupportedMediaElement, natural = getNaturalDimensions(element)): Rectangle & { scale: number; } {
+    const naturalAR = natural.width / natural.height;
+    const containAR = element.clientWidth / element.clientHeight;
 
+    let scale: number;
     let width: number;
     let height: number;
-    if (canonical > stretched) {
+    if (naturalAR > containAR) {
         width = element.clientWidth;
-        height = element.clientWidth / canonical;
+        height = element.clientWidth / naturalAR;
+        scale = element.clientWidth / natural.width;
     } else {
-        width = element.clientHeight * canonical;
+        width = element.clientHeight * naturalAR;
         height = element.clientHeight;
+        scale = element.clientHeight / natural.height;
     }
 
-    return { width, height };
+    const x = (element.clientWidth - width) / 2;
+    const y = (element.clientHeight - height) / 2;
+    return { width, height, x, y, scale };
 }
-
 
 function ChatbubbleEditor({ chatbubble }: { chatbubble: Chatbubble; }) {
     const { configuration: { source, uncroppedResolution: resolution }, preview } = chatbubble;
@@ -727,8 +861,11 @@ function ChatbubbleEditor({ chatbubble }: { chatbubble: Chatbubble; }) {
         return dimmed;
     }, [source]);
 
-    useOnSizeChange(source, () => {
-        preview.resize(getContainFit(source, resolution));
+
+    preview.resize(source);
+    useOnSizeChange(source, (_, changed) => {
+        if (!changed) return;
+        preview.resize(source);
         draw();
     });
 
@@ -738,12 +875,230 @@ function ChatbubbleEditor({ chatbubble }: { chatbubble: Chatbubble; }) {
     }
 
     draw();
-    return <>
-        {ReactWrapHTML("div", {}, [dimmed, source, preview.canvas as HTMLCanvasElement])}
-        <Points chatbubble={chatbubble} onChange={() => chatbubble.updateCropClip()} dimensions={resolution} clamp={true} list={ChatbubblePoints.List.Identifier.Crop} />
-        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} clamp={false} list={ChatbubblePoints.List.Identifier.Bezier} />
-        <Points chatbubble={chatbubble} onChange={draw} dimensions={resolution} clamp={false} list={ChatbubblePoints.List.Identifier.Spike} />
-    </>;
+    return <div className={cl("editor", "contain-force")}>
+        <SelectionDetector chatbubble={chatbubble} draw={draw} />
+        <ImageSizedContainer dimensions={resolution}>
+            {ReactWrapHTML("div", { style: { display: "contents " } }, [dimmed, source, preview.canvas as HTMLCanvasElement])}
+        </ImageSizedContainer>
+        <CropControls chatbubble={chatbubble} />
+        <ShapeHandles chatbubble={chatbubble} draw={draw} />
+    </div>;
+}
+
+function SelectionDetector({ chatbubble, draw }: { chatbubble: Chatbubble; draw: () => void; }) {
+    const self = React.createRef<HTMLDivElement>();
+    const shapes = chatbubble.configuration.shapes.getState();
+    const uncropped = chatbubble.configuration.uncroppedResolution;
+    let last: MouseEvent | null = null;
+
+    function updatePosition(event: MouseEvent) {
+        if (!self.current) return null;
+        const origin = self.current.getBoundingClientRect();
+        const x = (event.clientX - last!.clientX) / origin.width;
+        const y = (event.clientY - last!.clientY) / origin.height;
+        const adjust = [x, y] as const;
+        for (const index of shapes.selected) {
+            shapes.move(index, adjust);
+        }
+        last = event;
+        draw();
+    }
+
+    function getHovered(event: MouseEvent): number | null {
+        if (!self.current) return null;
+        const origin = self.current.getBoundingClientRect();
+        const x = (event.pageX - origin.x);
+        const y = (event.pageY - origin.y);
+        const position = [x, y] as const;
+        const index = chatbubble.configuration.shapes.getState().list.findLastIndex(shape => {
+            if (shape.testPoint(chatbubble.preview.context, {
+                x: 0, y: 0,
+                width: origin.width,
+                height: origin.height
+            }, position)) {
+                return true;
+            }
+        });
+        if (index === -1) return null;
+        return index;
+    }
+
+    return <div
+        ref={self}
+        style={{ "aspectRatio": uncropped.width + "/" + uncropped.height }}
+        className={cl("editor-selector", "contain-force")}
+        onMouseDown={event => {
+            // TODO: context menu to move down/up layer on right click?
+            const hovered = getHovered(event as never);
+            if (hovered === null) { shapes.selected.clear(); return; }
+            shapes.selected.add(hovered);
+            document.addEventListener("mouseup", () => {
+                document.removeEventListener("mousemove", updatePosition);
+                shapes.selected.clear();
+            }, { once: true });
+            document.addEventListener("mousemove", updatePosition);
+            last = event.nativeEvent;
+        }}
+    />;
+}
+
+function CropControls({ chatbubble }: { chatbubble: Chatbubble; }) {
+    return <ImageSizedContainer data-handle-controls="crop" dimensions={chatbubble.configuration.uncroppedResolution}>
+        <CropBorderOverlay chatbubble={chatbubble} />
+        {[Corner.TOP_LEFT, Corner.TOP_RIGHT, Corner.BOTTOM_RIGHT, Corner.BOTTOM_LEFT].map(corner => {
+            return <CornerCropHandle chatbubble={chatbubble} corner={corner} />;
+        })}
+    </ImageSizedContainer>;
+}
+
+function CropBorderOverlay({ chatbubble }: { chatbubble: Chatbubble; }) {
+    const ref = useRef<HTMLDivElement | null>(null);
+    function resetStyledBox() {
+        if (!ref.current) return;
+        const { x, y, width, height } = chatbubble.configuration.getCroppedRectangle(lodash.pick(chatbubble.configuration.source, "width", "height"));
+        ref.current.style.left = `${x}px`;
+        ref.current.style.top = `${y}px`;
+        ref.current.style.width = `${width}px`;
+        ref.current.style.height = `${height}px`;
+    }
+    useEffect(() => chatbubble.configuration.crop.subscribe(resetStyledBox), []);
+    useOnSizeChange(chatbubble.configuration.source, resetStyledBox);
+    return <div className={cl("editor-crop-outline")} ref={ref} />;
+}
+
+const enum Corner {
+    TOP_LEFT = 0,
+    TOP_RIGHT = 1,
+    BOTTOM_RIGHT = 2,
+    BOTTOM_LEFT = 3
+}
+
+const CORNER_CROP_HANDLE_STROKE_LENGTH = 15;
+const CORNER_CROP_HANDLE_STROKE_WIDTH = 3;
+const CORNER_CROP_HANDLE_PAD = 4;
+function CornerCropHandle({ chatbubble, corner }: { chatbubble: Chatbubble; corner: Corner; }) {
+    let reprSizeX!: number;
+    let reprSizeY!: number;
+    function calculateNormalizedSizeRepresentation() {
+        const { width, height } = getClientDimensions(chatbubble.configuration.source);
+        reprSizeX = (CORNER_CROP_HANDLE_STROKE_LENGTH) / width;
+        reprSizeY = (CORNER_CROP_HANDLE_STROKE_LENGTH) / height;
+    }
+    calculateNormalizedSizeRepresentation();
+
+    const top = corner < 2;
+    const left = (corner % 2 === 0) === top;
+
+    function normalizedPositionFromState(store: CropStore, applyShift = true) {
+        calculateNormalizedSizeRepresentation();
+        const { corners: { normalized } } = store;
+        return [
+            left ? normalized[0][0] : normalized[1][0] - reprSizeX,
+            top ? normalized[0][1] : normalized[1][1] - reprSizeY,
+        ] as CoordinateTuple;
+    }
+
+    function getCanonicalNormalizedPosition() {
+        return normalizedPositionFromState(chatbubble.configuration.crop.getState(), true);
+    }
+
+    const ref = useRef<HTMLDivElement | null>(null);
+
+    const [position, setPosition] = useState<CoordinateTuple>(getCanonicalNormalizedPosition());
+
+    useOnSizeChange(chatbubble.preview.canvas as HTMLElement, () => {
+        const difference = getCanonicalNormalizedPosition();
+        if (difference.some((value, index) => position[index] !== value)) {
+            setPosition(difference);
+            chatbubble.updateCropClip();
+        }
+    });
+
+    useEffect(() => chatbubble.configuration.crop.subscribe(state => {
+        if (state.editing === corner) return;
+        setPosition(normalizedPositionFromState(state, true));
+        chatbubble.updateCropClip();
+    }));
+
+    const tx = -CORNER_CROP_HANDLE_PAD + CORNER_CROP_HANDLE_STROKE_WIDTH * (left ? -1 : 1);
+    const ty = -CORNER_CROP_HANDLE_PAD + CORNER_CROP_HANDLE_STROKE_WIDTH * (top ? -1 : 1);
+
+    useDraggability({
+        normalize: true,
+        position,
+        clamp: [[0, 1 - reprSizeX], [0, 1 - reprSizeY]],
+        offset: [-tx, -ty],
+        ref,
+        onPointerDown() {
+            chatbubble.configuration.crop.setState({ editing: corner });
+        },
+        onPointerUp() {
+            chatbubble.configuration.crop.setState({ editing: null });
+        },
+        onPointerMove(position) {
+            const corners = chatbubble.configuration.crop.getState().corners.clone();
+            switch (corner) {
+                case Corner.TOP_LEFT:
+                    (corners.normalized[0] as [number, number])[0] = position[0];
+                    (corners.normalized[0] as [number, number])[1] = position[1];
+                    break;
+                case Corner.TOP_RIGHT:
+                    (corners.normalized[0] as [number, number])[1] = position[1];
+                    (corners.normalized[1] as [number, number])[0] = position[0] + reprSizeX;
+                    break;
+                case Corner.BOTTOM_RIGHT:
+                    (corners.normalized[1] as [number, number])[0] = position[0] + reprSizeX;
+                    (corners.normalized[1] as [number, number])[1] = position[1] + reprSizeY;
+                    break;
+                case Corner.BOTTOM_LEFT:
+                    (corners.normalized[0] as [number, number])[0] = position[0];
+                    (corners.normalized[1] as [number, number])[1] = position[1] + reprSizeY;
+                    break;
+            }
+            chatbubble.configuration.crop.setState({ corners });
+        },
+    });
+
+    return <div
+        ref={ref}
+        className={cl("editor-crop-handle")}
+    >
+        <svg
+            width={CORNER_CROP_HANDLE_STROKE_LENGTH + CORNER_CROP_HANDLE_PAD * 2}
+            height={CORNER_CROP_HANDLE_STROKE_LENGTH + CORNER_CROP_HANDLE_PAD * 2}
+            transform={`translate(${tx}, ${ty})`}
+        >
+            {/* math here is probably incorrect (esp the random 1.5) but who fuck care */}
+            <rect className={cl("hitbox-expanded")} fill="transparent" x={0} y={top ? 0 : (CORNER_CROP_HANDLE_STROKE_LENGTH + CORNER_CROP_HANDLE_STROKE_WIDTH) - CORNER_CROP_HANDLE_PAD * 1.5} width={CORNER_CROP_HANDLE_STROKE_LENGTH + CORNER_CROP_HANDLE_PAD * 2} height={CORNER_CROP_HANDLE_STROKE_WIDTH + CORNER_CROP_HANDLE_PAD * 2} />
+            <rect className={cl("hitbox-expanded")} fill="transparent" y={0} x={left ? 0 : (CORNER_CROP_HANDLE_STROKE_LENGTH + CORNER_CROP_HANDLE_STROKE_WIDTH) - CORNER_CROP_HANDLE_PAD * 1.5} width={CORNER_CROP_HANDLE_STROKE_WIDTH + CORNER_CROP_HANDLE_PAD * 2} height={CORNER_CROP_HANDLE_STROKE_LENGTH + CORNER_CROP_HANDLE_PAD * 2} />
+            <rect fill="white" x={CORNER_CROP_HANDLE_PAD} y={CORNER_CROP_HANDLE_PAD + (top ? 0 : CORNER_CROP_HANDLE_STROKE_LENGTH - CORNER_CROP_HANDLE_STROKE_WIDTH)} width={CORNER_CROP_HANDLE_STROKE_LENGTH} height={CORNER_CROP_HANDLE_STROKE_WIDTH} />
+            <rect fill="white" y={CORNER_CROP_HANDLE_PAD} x={CORNER_CROP_HANDLE_PAD + (left ? 0 : CORNER_CROP_HANDLE_STROKE_LENGTH - CORNER_CROP_HANDLE_STROKE_WIDTH)} width={CORNER_CROP_HANDLE_STROKE_WIDTH} height={CORNER_CROP_HANDLE_STROKE_LENGTH} />
+        </svg>
+    </div >;
+}
+
+function ShapeHandles({ chatbubble, draw }: { chatbubble: Chatbubble; draw: () => void; }) {
+    return chatbubble.configuration.shapes(shapes => shapes.list.map((shape, index) => {
+        if (shape instanceof AbstractDrawnPathedShape) {
+            return <ShapePointsHandles
+                shape={shape}
+                chatbubble={chatbubble}
+                onChange={draw}
+            />;
+        } else {
+            throw new Error("No handle implementation for given shape!");
+        }
+    }));
+}
+
+function ShapePointsHandles({ chatbubble, shape, onChange }: { chatbubble: Chatbubble, shape: AbstractDrawnPathedShape, onChange: () => void; }) {
+    return <Points
+        color={shape instanceof DrawnBezierCurve ? "blue" : "red"}
+        onChange={onChange}
+        dimensions={chatbubble.configuration.uncroppedResolution}
+        clamp={false}
+        points={shape.getNormalizedPoints()}
+    />;
 }
 
 function ChatbubbleEditorFooter({ close, chatbubble }: {
@@ -752,16 +1107,20 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
 }) {
     const [format, setFormat] = useState(chatbubble.configuration.format);
     useEffect(() => { chatbubble.configuration.format = format; }, [format]);
+    const [strokeStyle, setStrokeStyle] = useState(chatbubble.configuration.stroke);
+    useEffect(() => {
+        chatbubble.configuration.stroke = strokeStyle;
+        chatbubble.preview.clear();
+        chatbubble.preview.drawBubble();
+    }, [strokeStyle]);
     const [fillStyle, setFillStyle] = useState(chatbubble.configuration.fill);
     useEffect(() => {
         chatbubble.configuration.fill = fillStyle;
-        chatbubble.preview.updateDrawStyle();
         chatbubble.preview.clear();
         chatbubble.preview.drawBubble();
     }, [fillStyle]);
 
-    const colorButtonInputRef = useRef<HTMLInputElement>(null);
-    const points = chatbubble.configuration.points();
+    const shapes = chatbubble.configuration.shapes();
     return <>
         <Select
             options={[
@@ -780,13 +1139,34 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
         <Button>
             {/* TODO: Find a way to import or imitate Discord's color picker. Or make my own, with alpha support. */}
             <input
-                ref={colorButtonInputRef}
                 value={fillStyle.slice(0, "#".length + 6)}
                 type="color"
                 onChange={event => setFillStyle(event.target.value as Color.Hex)}
             />
-            <span>Edit Color</span>
+            <span>Edit Fill Color</span>
         </Button>
+        <Forms.FormSection>
+            <Forms.FormTitle>Border</Forms.FormTitle>
+            <CheckedTextInput
+                type="number"
+                value={String(strokeStyle.width)}
+                validate={input => {
+                    console.log(input);
+                    return !Number.isNaN(+input) ? true : "Input must be a number!";
+                }}
+                onChange={value => setStrokeStyle({ ...strokeStyle, width: +value })}
+                maxLength={3}
+            />
+            <Button>
+                {/* TODO: Find a way to import or imitate Discord's color picker. Or make my own, with alpha support. */}
+                <input
+                    value={fillStyle.slice(0, "#".length + 6)}
+                    type="color"
+                    onChange={event => setStrokeStyle({ ...strokeStyle, color: event.target.value as Color.Hex })}
+                />
+                <span>Edit Stroke Color</span>
+            </Button>
+        </Forms.FormSection>
         <Button
             color={Button.Colors.GREEN}
             onClick={() => close(true)}
@@ -794,8 +1174,7 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
         <Button
             color={Button.Colors.YELLOW}
             onClick={() => {
-                points.invert(ChatbubblePoints.List.Identifier.Bezier, { y: true });
-                points.invert(ChatbubblePoints.List.Identifier.Spike, { y: true });
+                shapes.invert({ y: true });
                 chatbubble.preview.clear();
                 chatbubble.preview.drawBubble();
             }}
@@ -803,86 +1182,291 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
     </>;
 }
 
+interface CanvasRenderingEnvironment {
+    canvas: Canvas,
+    context: CanvasContext2D;
+}
 
-function Points({ chatbubble, dimensions, list, onChange: notifyChange, clamp }: {
-    chatbubble: Chatbubble,
+type Tuple<T, N extends number, A extends T[] = []> = number extends N ? T[] : A["length"] extends N ? A : Tuple<T, N, [...A, T]>;
+
+type DrawOptions =
+    | { fill: CanvasContext2D["fillStyle"] | true; stroke?: undefined, lineWidth?: number; winding?: CanvasFillRule; }
+    | { fill?: never, stroke?: CanvasContext2D["strokeStyle"] | true, lineWidth?: number; winding?: never; };
+
+interface ShapePointTestable {
+    testPoint(context: CanvasContext2D, space: Rectangle, coordinates: CoordinateTuple, winding?: CanvasFillRule): boolean;
+    testPointOnLine(context: CanvasContext2D, space: Rectangle, coordinates: CoordinateTuple): boolean;
+}
+
+abstract class AbstractDrawnShape implements ShapePointTestable {
+    public abstract testPoint(context: CanvasContext2D, space: Rectangle, coordinates: CoordinateTuple, winding?: CanvasFillRule): boolean;
+    public abstract testPointOnLine(context: CanvasContext2D, space: Rectangle, coordinates: CoordinateTuple): boolean;
+    public abstract draw(context: CanvasContext2D, space: Rectangle, options: DrawOptions): void;
+    public cloneShallow() {
+        const copy = { ...this };
+        Reflect.setPrototypeOf(copy, this.constructor.prototype);
+        return copy;
+    }
+}
+
+abstract class AbstractDrawnPathedShape<P extends NormalizedPointList = NormalizedPointList> extends AbstractDrawnShape {
+    constructor() { super(); }
+
+    public abstract getNormalizedPoints(): P;
+    public getPoints(space: Rectangle) {
+        return this.getNormalizedPoints().toSpace(space);
+    }
+
+    public testPoint(context: CanvasContext2D, space: Rectangle, coordinates: CoordinateTuple, winding?: CanvasFillRule): boolean {
+        return context.isPointInPath(this.getPath(space), ...coordinates, winding);
+    }
+
+    public testPointOnLine(context: CanvasContext2D, space: Rectangle, coordinates: CoordinateTuple): boolean {
+        return context.isPointInStroke(this.getPath(space), ...coordinates);
+    }
+
+    public abstract getPath(scale: Dimensions): Path2D;
+
+    protected applyStyle(context: CanvasContext2D, { fill, stroke, lineWidth }: Exclude<DrawOptions, "winding">) {
+        context.lineWidth = lineWidth ?? 1;
+        if (fill !== undefined && fill !== true) {
+            context.fillStyle = fill;
+        } else if (stroke !== undefined && stroke !== true)
+            context.strokeStyle = stroke;
+    }
+
+    protected drawPath(context: CanvasContext2D, path: Path2D, options: DrawOptions) {
+        this.applyStyle(context, options);
+        if (options.fill !== undefined) {
+            context.fill(path, options.winding);
+        } else if (options.stroke !== undefined) {
+            context.stroke(path);
+        }
+    }
+
+    public draw(context: CanvasContext2D, space: Rectangle, options: DrawOptions) {
+        this.drawPath(context, this.getPath(space), options);
+    }
+}
+
+type PolygonPoints<N extends number> = NormalizedPointList<Tuple<CoordinateTuple, N>>;
+class DrawnPolygon<N extends number = number> extends AbstractDrawnPathedShape<PolygonPoints<N>> {
+    constructor(public normalizedPoints: PolygonPoints<N>) { super(); }
+    public getNormalizedPoints(): PolygonPoints<N> { return this.normalizedPoints; }
+    public getPath(space: Rectangle) {
+        const points = this.getPoints(space) as CoordinateTuple[];
+        const path = new Path2D();
+        path.moveTo(...points[0] as CoordinateTuple);
+        for (const point of points.slice(1)) {
+            path.lineTo(...point);
+        }
+        path.closePath();
+        return path;
+    }
+}
+
+
+class DrawnBezierCurve extends DrawnPolygon<4> {
+    constructor(normalizedPoints: PolygonPoints<4>) { super(normalizedPoints); }
+
+    public applyCurveUpon(path: Path2D, space: Rectangle,
+        curve: Tuple<CoordinateTuple, 3> =
+            this.getNormalizedPoints().toSpace(space).slice(1) as never
+    ) {
+        path.bezierCurveTo(...curve.flat() as Flatten<typeof curve>);
+    }
+
+    public drawControlLines(context: CanvasContext2D, space: Rectangle, options: Extract<DrawOptions, { fill?: undefined; }>, points = this.getPoints(space) as Tuple<CoordinateTuple, 4>) {
+        this.applyStyle(context, options);
+
+        context.beginPath();
+        context.moveTo(...points[0]);
+        context.lineTo(...points[1]);
+        context.stroke();
+
+        context.beginPath();
+        context.moveTo(...points[3]);
+        context.lineTo(...points[2]);
+        context.stroke();
+    }
+
+    public getPath(space: Rectangle, points = this.getPoints(space) as Tuple<CoordinateTuple, 4>) {
+        const path = new Path2D();
+        const [start, ...curve] = points;
+        path.moveTo(...start);
+        this.applyCurveUpon(path, space, curve);
+        path.closePath();
+        return path;
+    }
+}
+
+function ImageSizedContainer({ dimensions, classes = [], children }: { dimensions: Dimensions, classes?: string[], children: React.ReactNode; }) {
+    return <div
+        className={cl("contain-force", ...classes)}
+        style={{ "aspectRatio": dimensions.width + "/" + dimensions.height }}
+    >{children}</div>;
+}
+
+
+// class DrawnBezierSpline extends DrawnPath {
+//     constructor(public readonly curves: DrawnBezierCurve[]) { super(); }
+//     public getNormalizedPoints(): NormalizedPointList<ChatbubblePoints.CoordinateTuple[]> {
+//         return new NormalizedPointList(this.curves.map(curve => curve.getNormalizedPoints().normalized).flat());
+//     }
+
+//     public getPath(space: Rectangle): Path2D {
+//         const path = new Path2D();
+//         const start = this.curves[0].getPoints(space) as Tuple<CoordinateTuple, 4>;
+//         path.moveTo(...start[0]);
+//         this.curves[0].applyCurve(path, space, start.slice(1) as Tuple<CoordinateTuple, 3>);
+//         for (const curve of this.curves.slice(1)) {
+//             curve.applyCurve(path, space);
+//         }
+//         path.closePath();
+//         return path;
+//     }
+// }
+
+function Points({ dimensions, points, color, onChange: notifyChange, clamp }: {
     dimensions: Dimensions;
-    list: ChatbubblePoints.List.Identifier;
+    points: NormalizedPointList;
     onChange: () => void;
+    color: string;
     clamp: boolean;
 }) {
-    const points = chatbubble.configuration.points(state => state[list]).normalized;
-    const color = ChatbubblePoints.List.VisualizationColors[list];
-
-    return <div
-        data-list-type={list}
-        className={cl("editor-points", "contain-like")}
-        style={{
-            ["--vc-cb-editor-point-size" as never]: "10px",
-            ["--vc-cb-editor-point-color" as never]: color,
-            "aspectRatio": dimensions.width + "/" + dimensions.height
-        }}
-    >
-        {points.map((position, index) =>
-            <DraggableNormalizedPointVisualization
+    return <ImageSizedContainer classes={["editor-points"]} dimensions={dimensions}>
+        {points.normalized.map((position, index) =>
+            <PointVisualization
+                size={10}
                 color={color}
                 position={position}
-                onMove={position => { points[index] = position; notifyChange(); }}
+                onMove={position => {
+                    points.normalized[index] = position;
+                    notifyChange();
+                }}
                 clamp={clamp}
             />
         )}
-    </div>;
+    </ImageSizedContainer>;
 }
 
 function clamp(value: number, lo: number, hi: number) {
     return Math.max(lo, Math.min(hi, value));
 }
 
-function first<T>(v: T, ...args: unknown[]): T { return v; }
-
-function DraggableNormalizedPointVisualization({
+function useDraggability({ ref, normalize = true, clamp: range, progressiveAdjustment = [0, 0],
     position,
-    onMove: escalatePositionInfo,
-    clamp: doClamp,
+    offset,
+    onPointerMove,
+    onPointerDown,
+    onPointerUp
 }: {
-    color: string;
-    position: CoordinateTuple;
-    onMove: (position: CoordinateTuple) => void;
-    clamp: boolean;
+    position?: CoordinateTuple,
+    ref: React.MutableRefObject<HTMLElement | null>,
+    normalize?: boolean,
+    onPointerMove: (position: CoordinateTuple, delta: CoordinateTuple, event: MouseEvent) => void,
+    onPointerDown?: (event: MouseEvent) => void;
+    onPointerUp?: (event: MouseEvent) => void;
+    clamp?: boolean | [x: CoordinateTuple, y: CoordinateTuple];
+    offset?: CoordinateTuple;
+    progressiveAdjustment?: [number, number];
 }) {
-    const ref = useRef<HTMLDivElement | null>(null);
-    let click: MouseEvent | null = null;
+    if (range === true) range = normalize ? [[0, 1], [0, 1]] : ref.current !== null ? [[0, ref.current.clientWidth], [0, ref.current.clientHeight]] : null!;
+
+    let start: PointerEvent | null = null;
+    let last: PointerEvent | null = null;
 
     function updateStyledPosition(position: CoordinateTuple) {
         if (!ref.current) return;
         const { style } = ref.current;
-        style.left = `calc(${position[0] * 100}% - calc(${position[0]} * var(--vc-cb-editor-point-size)))`;
-        style.top = `calc(${position[1] * 100}% - calc(${position[1]} * var(--vc-cb-editor-point-size)))`;
+        // uhh progressive adjustment no worky on normalize fixme or just remove non-normalize
+        style.left = `calc(${position[0] * (normalize ? 100 : 1)}% - ${position[0] * progressiveAdjustment[0]}px)`;
+        style.top = `calc(${position[1] * (normalize ? 100 : 1)}% - ${position[1] * progressiveAdjustment[1]}px)`;
     }
 
-    function updatePosition(event: MouseEvent) {
+    function updatePosition(event: PointerEvent) {
         if (!ref.current) return;
         const container = ref.current.parentElement!;
         const origin = container.getBoundingClientRect();
-        const size = Number(window.getComputedStyle(container).getPropertyValue("--vc-cb-editor-point-size").slice(0, -"px".length));
-        const x = (doClamp ? clamp : first)((event.pageX - origin.x - click!.offsetX) / (origin.width - size), 0, 1) as number;
-        const y = (doClamp ? clamp : first)((event.pageY - origin.y - click!.offsetY) / (origin.height - size), 0, 1) as number;
+        let x: number = (event.pageX - origin.x - start!.offsetX);
+        let y: number = (event.pageY - origin.y - start!.offsetY);
+        if (offset) {
+            x += offset[0];
+            y += offset[1];
+        }
+        if (normalize) {
+            x /= origin.width - progressiveAdjustment[0];
+            y /= origin.height - progressiveAdjustment[1];
+        }
+        if (range) {
+            x = clamp(x, ...range[0] as [number, number]);
+            y = clamp(y, ...range[1] as [number, number]);
+        }
         const position = [x, y] as const;
+        let dx = event.clientX - last!.clientX;
+        let dy = event.clientY - last!.clientY;
+        if (normalize) {
+            dx /= origin.width;
+            dy /= origin.height;
+        }
         updateStyledPosition(position);
-        escalatePositionInfo(position);
+        onPointerMove(position, [dx, dy], event);
+        last = event;
     }
 
-    useEffect(() => {
+    if (position) useEffect(() => {
         updateStyledPosition(position);
     }, [position]);
 
-    return <div ref={ref} onMouseDown={event => {
-        if (event.button !== 0) return; // TODO: mobile?
-        document.addEventListener("mouseup", () => {
-            document.removeEventListener("mousemove", updatePosition);
+    function onInteractStart(event: PointerEvent) {
+        if (event.button !== 0) return;
+        onPointerDown?.(event);
+        document.addEventListener("pointerup", event => {
+            onPointerUp?.(event);
+            document.removeEventListener("pointermove", updatePosition);
         }, { once: true });
-        document.addEventListener("mousemove", updatePosition);
-        click = event.nativeEvent;
-    }} />;
+        document.addEventListener("pointermove", updatePosition);
+        start = event;
+        last = event;
+    }
+
+    useEffect(() => {
+        ref.current?.addEventListener("pointerdown", onInteractStart);
+        return () => {
+            ref.current?.removeEventListener("pointerdown", onInteractStart);
+        };
+    });
+}
+
+function PointVisualization({
+    position,
+    color,
+    onMove: escalatePositionInfo,
+    clamp,
+    size
+}: {
+    size: number,
+    color: string;
+    position: CoordinateTuple;
+    onMove: (position: CoordinateTuple) => void;
+    clamp?: boolean;
+}) {
+    const ref = useRef<HTMLDivElement | null>(null);
+
+    useDraggability({
+        ref, position, clamp,
+        onPointerMove: escalatePositionInfo,
+        progressiveAdjustment: [size, size]
+    });
+
+    return <div
+        ref={ref}
+        style={{
+            width: size,
+            height: size,
+            background: color
+        }}
+        className={cl("editor-point")}
+    />;
 }
 

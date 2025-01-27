@@ -55,9 +55,9 @@ export interface ChatbubbleFFmpegOptions {
         quality?: number;
     };
     overlay: {
-        transparent: boolean,
+        mask?: Uint8Array,
+        pixels?: Uint8Array,
         bounds: Rectangle;
-        pixels: Uint8Array,
     };
 }
 
@@ -162,6 +162,9 @@ export namespace ChatbubblePoints {
                 x * space.width + space.x,
                 y * space.height + space.y
             ] as const) as Readonly<{ [N in keyof T]: Readonly<T[N]> }>;
+        }
+        public clone(): NormalizedPointList<T> {
+            return new NormalizedPointList(this.normalized.map(coordinates => [...coordinates] as CoordinateTuple) as T);
         }
     }
 }

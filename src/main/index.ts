@@ -115,7 +115,7 @@ if (IS_VESKTOP || !IS_VANILLA) {
                     patchCsp(responseHeaders);
 
                 try {
-                    const parsedReferrer = URL.parse(referrer);
+                    const parsedReferrer = new URL(referrer);
                     if (parsedReferrer && resourceType === "xhr" && new URL(url).hostname.match(/^(?:media|cdn)\.discordapp\.(?:net|com)$/) && isDiscordHostname(parsedReferrer.hostname))
                         responseHeaders["access-control-allow-origin"] = [parsedReferrer.origin];
                 } catch (_) { }

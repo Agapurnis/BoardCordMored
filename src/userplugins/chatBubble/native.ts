@@ -630,8 +630,9 @@ namespace FFmpegJob {
     }
     export namespace IO {
         export type Paths = {
-            main: string,
-            bubble: string,
+            background: string,
+            bubble?: string,
+            mask?: string,
             out: string,
         };
 
@@ -665,7 +666,11 @@ namespace FFmpegJob {
             return FFmpegJob.IO.Method.Streaming;
         }
 
-        export async function streaming(file: ArrayBufferLike, overlay: ArrayBufferLike): Promise<FFmpegJob.IO<FFmpegJob.IO.Method.Streaming>> {
+        export async function streaming(
+            backgroundData: ArrayBufferLike,
+            maskData?: ArrayBufferLike,
+            bubbleData?: ArrayBufferLike
+        ): Promise<FFmpegJob.IO<FFmpegJob.IO.Method.Streaming>> {
             const chunks = new Array<Uint8Array>();
             const writable = new stream.Writable({
                 write(chunk, encoding, callback) {
@@ -675,20 +680,25 @@ namespace FFmpegJob {
                 }
             });
 
-            const [main, bubble, out] = await Promise.all([
-                FFmpegSocket.reading(reader(file)).url,
-                FFmpegSocket.reading(reader(overlay)).url,
+            const [background, mask, bubble, out] = await Promise.all([
+                FFmpegSocket.reading(reader(backgroundData)).url,
+                maskData && FFmpegSocket.reading(reader(maskData)).url,
+                bubbleData && FFmpegSocket.reading(reader(bubbleData)).url,
                 FFmpegSocket.writing(writable).url
             ]);
 
             return {
                 method: FFmpegJob.IO.Method.Streaming,
-                paths: { main, bubble, out },
+                paths: { background, mask, bubble, out },
                 chunks
             };
         }
 
-        export async function files(file: Uint8Array, overlay: Uint8Array): Promise<FFmpegJob.IO<FFmpegJob.IO.Method.TemporaryFiles>> {
+        export async function files(
+            backgroundData: Uint8Array,
+            maskData?: Uint8Array,
+            bubbleData?: Uint8Array
+        ): Promise<FFmpegJob.IO<FFmpegJob.IO.Method.TemporaryFiles>> {
             async function mk(prefix: string, content?: Uint8Array) {
                 const handle = await fftemp.create(prefix);
                 if (content) await handle.write(content);
@@ -696,30 +706,32 @@ namespace FFmpegJob {
                 return handle.path;
             }
 
-            const [main, bubble, out] = await Promise.all([
-                mk("main", file),
-                mk("bubble", overlay),
+            const [background, mask, bubble, out] = await Promise.all([
+                mk("main", backgroundData),
+                maskData && mk("mask", maskData),
+                bubbleData && mk("bubble", bubbleData),
                 mk("out")
             ]);
 
             return {
                 method: FFmpegJob.IO.Method.TemporaryFiles,
-                paths: { main, bubble, out },
+                paths: { background, mask, bubble, out },
                 chunks: undefined
             };
         }
 
-        export function get<T extends FFmpegJob.IO.Method>(method: T, file: Uint8Array, overlay: Uint8Array): Promise<FFmpegJob.IO<T>>;
+        export function get<T extends FFmpegJob.IO.Method>(method: T, background: Uint8Array, mask: Uint8Array, bubble: Uint8Array): Promise<FFmpegJob.IO<T>>;
         export function get(options: ChatbubbleFFmpegOptions): Promise<FFmpegJob.IO<FFmpegJob.IO.Method>>;
         export async function get<T extends FFmpegJob.IO.Method>(...args:
             | [options: ChatbubbleFFmpegOptions]
-            | [method: T, file: Uint8Array, overlay: Uint8Array]
+            | [method: T, background: Uint8Array, mask: Uint8Array, bubble: Uint8Array]
         ): Promise<FFmpegJob.IO<T>> {
             let method: T;
-            let file: Uint8Array;
-            let overlay: Uint8Array;
-            if (args.length === 3) {
-                [method, file, overlay] = args as Extract<Parameters<typeof get<T>>, { length: 3; }>;
+            let background: Uint8Array;
+            let mask: Uint8Array | undefined;
+            let overlay: Uint8Array | undefined;
+            if (args.length === 4) {
+                [method, background, mask, overlay] = args as Extract<Parameters<typeof get<T>>, { length: 4; }>;
             } else {
                 const options = args[0];
                 method = choose({
@@ -727,13 +739,13 @@ namespace FFmpegJob {
                     inputBytes: options.file.data.byteLength,
                     exportType: options.target.type,
                 }) as T;
-                file = options.file.data;
+                background = options.file.data;
                 overlay = options.overlay.pixels;
             }
 
             switch (method) {
-                case FFmpegJob.IO.Method.Streaming: return streaming(file, overlay) as Promise<FFmpegJob.IO<T>>;
-                case FFmpegJob.IO.Method.TemporaryFiles: return files(file, overlay) as Promise<FFmpegJob.IO<T>>;
+                case FFmpegJob.IO.Method.Streaming: return streaming(background, mask, overlay) as Promise<FFmpegJob.IO<T>>;
+                case FFmpegJob.IO.Method.TemporaryFiles: return files(background, mask, overlay) as Promise<FFmpegJob.IO<T>>;
                 default: assertUnreachable(method);
             }
         }
@@ -769,21 +781,33 @@ namespace FFmpegJob {
         args.push("-progress", "-", "-nostats");// , "-loglevel", "error");
         args.push("-y");
         if (img2vid) args.push("-loop", "1");
-        args.push("-i", io.paths.main);
-        args.push("-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${overlay.bounds.width}x${overlay.bounds.height}`, "-i", io.paths.bubble);
-        let filter = String(); let last = "0"; const last_bubble = "1";
-        filter += `[${last}]crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}:exact=1[cropped];`; last = "cropped";
-        if (overlay.transparent) {
-            filter += `[${last_bubble}]alphaextract[trans];[${last}][trans]alphamerge[overlaid];`; last = "overlaid";
-        } else {
-            filter += `[${last}][${last_bubble}]overlay=${overlay.bounds.x}:${overlay.bounds.y}[overlaid];`; last = "overlaid";
+        let main = "0";
+        let mask: string | true | null = null;
+        let bubble: string | true | null = null;
+        args.push("-i", io.paths.background);
+        if (io.paths.mask) {
+            args.push("-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${overlay.bounds.width}x${overlay.bounds.height}`, "-i", io.paths.mask);
+            mask = "1";
+        }
+        if (io.paths.bubble) {
+            args.push("-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${overlay.bounds.width}x${overlay.bounds.height}`, "-i", io.paths.bubble);
+            bubble = io.paths.mask ? "2" : "1";
+        }
+        let filter = String();
+        filter += `[${main}]crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}:exact=1[cropped];`; main = "cropped";
+        if (mask) {
+            filter += `[${mask}]alphaextract[mask];`; mask = "mask";
+            filter += `[${mask}][${main}]alphamerge[masked];`; main = "masked"; mask = true;
+        }
+        if (bubble) {
+            filter += `[${main}][${bubble}]overlay=${overlay.bounds.x}:${overlay.bounds.y}[overlaid];`; main = "overlaid"; bubble = true;
         }
         if (type === ChatbubbleExportFormat.GIF) {
             // https://superuser.com/a/1323430
-            filter += `[${last}]split=[a][b];[a]palettegen[pal];[b][pal]paletteuse=dither=sierra2_4a[paletted];`; last = "paletted";
+            filter += `[${main}]split=[a][b];[a]palettegen[pal];[b][pal]paletteuse=dither=sierra2_4a[paletted];`; main = "paletted";
         }
         args.push("-filter_complex", filter);
-        args.push("-map", `[${last}]`);
+        args.push("-map", `[${main}]`);
         args.push("-map", "0:a?"); // TODO: Allow custom audio for image/gif => video
         args.push(...outputSpecificationToFfmpegArguments(type, quality));
         if (img2vid) args.push("-t", "60");
