@@ -752,6 +752,9 @@ class Chatbubble {
             }
             renderer.drawBubble();
             const pixels = new Uint8Array(renderer.context.getImageData(0, 0, offscreen.canvas.width, offscreen.canvas.height).data);
+            if (transparent && (format.toString().startsWith("video") || format === ChatbubbleExportFormat.GIF)) {
+                return { mask: pixels, bounds };
+            }
             return { pixels, bounds };
         })();
 
@@ -1128,6 +1131,7 @@ function ChatbubbleEditorFooter({ close, chatbubble }: {
                 { value: ChatbubbleExportFormat.PNG, label: "PNG" },
                 { value: ChatbubbleExportFormat.MP4, label: "MP4" },
                 { value: ChatbubbleExportFormat.WEBM, label: "WEBM" },
+                { value: ChatbubbleExportFormat.WEBP, label: "WEBP" },
             ]}
             placeholder={"Output Format"}
             maxVisibleItems={5}

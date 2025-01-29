@@ -473,7 +473,7 @@ function reader(data: ArrayBufferLike | TypedArray | DataView | Buffer | string,
  * @throws { child_process.ExecException } rejection on command execution failure
  */
 async function locateBinary(name: string): Promise<string | null> {
-    const command = os.platform() === "win32" ? `where ${name}` : `which ${name}`;
+    const command = os.platform() === "win32" ? `where ${name}` : `bash -c "which ${name}"`;
     const result = await exec(command, { windowsHide: true });
     const output = result.stdout.trimStart();
     if (output.length === 0) return null;
@@ -658,7 +658,10 @@ namespace FFmpegJob {
         }): FFmpegJob.IO.Method {
             if (
                 (inputMime === ChatbubbleExportFormat.GIF) ||
-                (inputMime.startsWith("video") && exportType === ChatbubbleExportFormat.GIF) || // need entire for palette gen across video ?? idk actually i need more reseach
+                (inputMime.startsWith("video") && (
+                    exportType === ChatbubbleExportFormat.GIF ||
+                    exportType === ChatbubbleExportFormat.WEBP
+                )) ||
                 (exportType === ChatbubbleExportFormat.MP4) || // fragment are stinky
                 (exportType === ChatbubbleExportFormat.WEBM)
             ) return FFmpegJob.IO.Method.TemporaryFiles;
@@ -733,7 +736,7 @@ namespace FFmpegJob {
             if (args.length === 4) {
                 [method, background, mask, overlay] = args as Extract<Parameters<typeof get<T>>, { length: 4; }>;
             } else {
-                const options = args[0];
+                const [options] = args;
                 method = choose({
                     inputMime: options.file.mime,
                     inputBytes: options.file.data.byteLength,
@@ -741,6 +744,7 @@ namespace FFmpegJob {
                 }) as T;
                 background = options.file.data;
                 overlay = options.overlay.pixels;
+                mask = options.overlay.mask;
             }
 
             switch (method) {
@@ -768,19 +772,21 @@ namespace FFmpegJob {
                 out.push("-f", "mp4", "-movflags", "+faststart");
                 return out;
             }
-            case ChatbubbleExportFormat.GIF: return ["-f", "gif"];
-            case ChatbubbleExportFormat.PNG: return ["-f", "apng"]; // uhh how do i do normal png this is wasteful
+            case ChatbubbleExportFormat.GIF: return ["-f", "gif", "-c:v", "gif"];
+            case ChatbubbleExportFormat.PNG: return ["-f", "apng"];
+            case ChatbubbleExportFormat.WEBP: return ["-f", "webp"];
             default: assertUnreachable(type);
         }
     }
 
     export function buildArguments(io: IO<FFmpegJob.IO.Method>, { file, overlay, target: { type, quality, crop } }: ChatbubbleFFmpegOptions): string[] {
         // TODO: Adding audio, GIF looping, trimming.
-        const img2vid = file.mime.startsWith("image") && type.startsWith("video");
+        const toVid = type.startsWith("video");
+        const fromImg = file.mime.startsWith("image");
         const args: string[] = [];
         args.push("-progress", "-", "-nostats");// , "-loglevel", "error");
         args.push("-y");
-        if (img2vid) args.push("-loop", "1");
+        if (fromImg && toVid && file.mime !== "video/mp4") args.push("-loop", "1");
         let main = "0";
         let mask: string | true | null = null;
         let bubble: string | true | null = null;
@@ -808,9 +814,9 @@ namespace FFmpegJob {
         }
         args.push("-filter_complex", filter);
         args.push("-map", `[${main}]`);
-        args.push("-map", "0:a?"); // TODO: Allow custom audio for image/gif => video
+        if (toVid) args.push("-map", "0:a?"); // TODO: Allow custom audio for image/gif => video
         args.push(...outputSpecificationToFfmpegArguments(type, quality));
-        if (img2vid) args.push("-t", "60");
+        if (fromImg && toVid) args.push("-t", "60");
         args.push(io.paths.out);
         console.log(args);
 

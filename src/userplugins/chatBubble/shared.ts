@@ -55,6 +55,7 @@ export interface ChatbubbleFFmpegOptions {
         quality?: number;
     };
     overlay: {
+        transparent: boolean,
         mask?: Uint8Array,
         pixels?: Uint8Array,
         bounds: Rectangle;
@@ -104,6 +105,7 @@ export const enum ChatbubbleExportFormat {
     GIF = "image/gif",
     MP4 = "video/mp4",
     WEBM = "video/webm",
+    WEBP = "image/webp",
 }
 
 export type ChatbubbleCanvasExportFormat = typeof SUPPORTED_CANVAS_EXPORT_FORMATS extends Set<infer T> ? T : never;

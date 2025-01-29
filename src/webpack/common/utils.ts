@@ -48,7 +48,7 @@ export const Constants: t.Constants = mapMangledModuleLazy('ME:"/users/@me"', {
 export const RestAPI: t.RestAPI = findLazy(m => typeof m === "object" && m.del && m.put);
 export const moment: typeof import("moment") = findByPropsLazy("parseTwoDigitYear");
 
-export const hljs: typeof import("highlight.js").default = findByPropsLazy("highlight", "registerLanguage");
+export const hljs: typeof import("highlight.js") = findByPropsLazy("highlight", "registerLanguage");
 
 export const { match, P }: Pick<typeof import("ts-pattern"), "match" | "P"> = mapMangledModuleLazy("@ts-pattern/matcher", {
     match: filters.byCode("return new"),
@@ -165,11 +165,11 @@ export const PermissionsBits: t.PermissionsBits = findLazy(m => typeof m.ADMINIS
 
 export const { zustandCreate } = mapMangledModuleLazy(["useSyncExternalStoreWithSelector:", "Object.assign"], {
     zustandCreate: filters.byCode(/=>(\i)\?\i\(\1/)
-});
+}) as { zustandCreate: typeof import("zustand").create; };
 
 export const { zustandPersist } = mapMangledModuleLazy(".onRehydrateStorage)?", {
     zustandPersist: filters.byCode(/(\(\i,\i\))=>.+?\i\1/)
-});
+}) as { zustandPersist: typeof import("zustand/middleware").persist; };
 
 export const MessageActions = findByPropsLazy("editMessage", "sendMessage");
 export const MessageCache = findByPropsLazy("clearCache", "_channelMessages");
